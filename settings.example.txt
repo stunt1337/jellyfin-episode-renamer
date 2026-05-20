@@ -1,0 +1,25 @@
+# Folder containing the episode files.
+# Use a normal season folder or a parent folder with nested release folders.
+folder=/path/to/your/show/Season 01
+
+# Series name used in the final Jellyfin-friendly filenames.
+series_name=Example Show
+
+# Season number and first episode number.
+season=1
+start_episode=1
+
+# true = preview only, no files are renamed.
+# false = actually rename files.
+dry_run=true
+
+# true = scan subfolders too.
+# Useful for release-style folders where every episode has its own directory.
+recursive=false
+
+# true = read the episode number from the filename/path, e.g. E01, E02, S01E03.
+# Useful for nested or incomplete folders.
+episode_from_path=false
+
+# Supported video file extensions.
+extensions=.mkv,.mp4,.avi,.mov,.m4v,.webm,.ts
