@@ -21,5 +21,14 @@ recursive=false
 # Useful for nested or incomplete folders.
 episode_from_path=false
 
+# true = rename matching sidecar files/folders too:
+# .nfo, -thumb images, and .trickplay folders.
+include_sidecars=false
+
+# true = move every episode into its own clean folder:
+# Example Show - S01E01/Example Show - S01E01.mkv
+# Empty old source folders are removed automatically after a successful apply run.
+flatten=false
+
 # Supported video file extensions.
 extensions=.mkv,.mp4,.avi,.mov,.m4v,.webm,.ts
