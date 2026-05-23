@@ -1,9 +1,26 @@
-# Folder containing the episode files.
-# Use a normal season folder or a parent folder with nested release folders.
+# Folder containing episode or movie files.
+# Use a normal season folder, a movie folder, or a parent folder with nested release folders.
 folder=/path/to/your/show/Season 01
 
-# Series name used in the final Jellyfin-friendly filenames.
+# Series name used in the final Jellyfin-friendly episode filenames.
 series_name=Example Show
+
+# Optional year for the show root folder:
+# Example Show (2024)/Season 01/Example Show - S01E01.mkv
+series_year=
+
+# true = use movie naming instead of episode naming.
+# Movie mode ignores season, start_episode, and episode_from_path.
+movie_mode=false
+
+# true = use show/series folder controls in the GUI.
+# The GUI keeps Movie mode and Show/Series mode mutually exclusive.
+show_mode=true
+
+# Movie title and release year used in the final Jellyfin-friendly movie filename:
+# Example Movie (2024).mkv
+movie_name=Example Movie
+movie_year=2024
 
 # Season number and first episode number.
 season=1
@@ -25,7 +42,33 @@ episode_from_path=false
 # .nfo, -thumb images, and .trickplay folders.
 include_sidecars=false
 
-# true = move every episode into its own clean folder:
+# true = in movie mode, rename one .nfo to movie.nfo.
+# If movie.nfo already exists, keep it and delete duplicate .nfo files.
+normalize_movie_nfo=false
+
+# true = in show mode, rename one show-root .nfo to tvshow.nfo.
+# Episode .nfo files are still renamed per episode when sidecars are enabled.
+normalize_show_nfo=false
+
+# true = in show mode, place episodes under a show root folder named:
+# Series Name (Year)
+rename_show_folder=false
+
+# true = in show mode, place episodes under Season XX folders.
+# Season-level season.nfo and generic artwork are moved there when sidecars are enabled.
+normalize_season_folder=false
+
+# true = in show mode, scan a show root and process multiple detected season folders.
+# This automatically reads season/episode numbers from paths.
+multi_season=false
+
+# true = in the GUI, ask after apply whether old source folders should be deleted
+# when they are outside the new Jellyfin structure.
+cleanup_stale_paths=false
+
+# true = move every episode into its own clean folder.
+# In movie mode, this creates one clean movie folder next to the selected source folder:
+# Example Movie (2024)/Example Movie (2024).mkv
 # Example Show - S01E01/Example Show - S01E01.mkv
 # Empty old source folders are removed automatically after a successful apply run.
 flatten=false

@@ -1,0 +1,15 @@
+[project]
+name = "jellyfin-episode-renamer"
+version = "1.2.0"
+description = "Preview and rename Jellyfin movie, show, season, episode, metadata, and trickplay files."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "HsOjo" }]
+
+[project.optional-dependencies]
+gui-dnd = ["tkinterdnd2"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
