@@ -15,10 +15,12 @@ except ImportError:
 from jellyfin_episode_renamer import (
     CONFIG_FILE,
     UNDO_LOG_FILE,
+    ConflictGroup,
     RenameItem,
     build_episode_plans,
     build_movie_plans,
     build_multi_season_episode_plans,
+    build_conflict_groups,
     detect_season_folders,
     delete_stale_source_dirs,
     find_stale_source_dirs,
@@ -160,12 +162,17 @@ class EpisodeRenamerApp(BaseTk):
         self.minsize(980, 560)
 
         self.plan: list[RenameItem] = []
+        self.episode_plans: list = []
+        self.conflict_groups: list[ConflictGroup] = []
+        self.resolved_conflict_indices: set[int] = set()
+        self.conflict_plan_indices: set[int] = set()
         self._tooltips: list[Tooltip] = []
 
         self.folder_var = tk.StringVar()
         self.series_var = tk.StringVar()
         self.year_var = tk.StringVar()
         self.preview_kind_var = tk.StringVar()
+        self.preview_state_var = tk.StringVar()
         self.preview_target_folder_var = tk.StringVar()
         self.preview_current_path_var = tk.StringVar()
         self.preview_target_path_var = tk.StringVar()
@@ -411,10 +418,13 @@ class EpisodeRenamerApp(BaseTk):
         details.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         details.columnconfigure(1, weight=1)
         details.columnconfigure(3, weight=1)
+        details.columnconfigure(5, weight=1)
         ttk.Label(details, text="Kind").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
         ttk.Entry(details, textvariable=self.preview_kind_var, state="readonly", style="Preview.TEntry").grid(row=0, column=1, sticky="ew", pady=2)
-        ttk.Label(details, text="Target folder").grid(row=0, column=2, sticky="w", padx=(12, 8), pady=2)
-        ttk.Entry(details, textvariable=self.preview_target_folder_var, state="readonly", style="Preview.TEntry").grid(row=0, column=3, sticky="ew", pady=2)
+        ttk.Label(details, text="State").grid(row=0, column=2, sticky="w", padx=(12, 8), pady=2)
+        ttk.Entry(details, textvariable=self.preview_state_var, state="readonly", style="Preview.TEntry").grid(row=0, column=3, sticky="ew", pady=2)
+        ttk.Label(details, text="Target folder").grid(row=0, column=4, sticky="w", padx=(12, 8), pady=2)
+        ttk.Entry(details, textvariable=self.preview_target_folder_var, state="readonly", style="Preview.TEntry").grid(row=0, column=5, sticky="ew", pady=2)
 
         diff = ttk.LabelFrame(table_frame, text="Diff preview", padding=(10, 8), style="Preview.TLabelframe")
         diff.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
@@ -822,11 +832,31 @@ class EpisodeRenamerApp(BaseTk):
 
     def preview(self) -> None:
         try:
-            self.plan = self._build_plan_from_form()
+            self.episode_plans = self._build_episode_plans_from_form()
         except ValueError as error:
             self.show_error("Invalid settings", str(error))
             return
 
+        self.conflict_groups = build_conflict_groups(self.episode_plans)
+        self.conflict_plan_indices = {candidate.plan_index for group in self.conflict_groups for candidate in group.candidates}
+        if self.conflict_groups:
+            keep_indices = self.resolve_conflicts_dialog(self.conflict_groups)
+            if keep_indices is None:
+                self.status_var.set(f"{len(self.conflict_groups)} conflict group(s) pending.")
+                self.plan = flatten_plan(self.episode_plans)
+                self._fill_table(self.plan)
+                return
+            conflicted_indices = {candidate.plan_index for group in self.conflict_groups for candidate in group.candidates}
+            keep_indices = set(keep_indices)
+            self.episode_plans = [
+                plan
+                for index, plan in enumerate(self.episode_plans)
+                if index not in conflicted_indices or index in keep_indices
+            ]
+            self.conflict_groups = []
+            self.conflict_plan_indices = set()
+
+        self.plan = flatten_plan(self.episode_plans)
         self._fill_table(self.plan)
 
         if not self.plan:
@@ -843,6 +873,170 @@ class EpisodeRenamerApp(BaseTk):
         changed = count_changed(self.plan)
         self.status_var.set(f"Preview ready: {len(self.plan)} files, {changed} rename(s).")
         self._update_preview_details()
+
+    def resolve_conflicts_dialog(self, conflict_groups: list[ConflictGroup]) -> set[int] | None:
+        dialog = tk.Toplevel(self)
+        dialog.title("Resolve conflicts")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.geometry("980x560")
+        dialog.minsize(820, 420)
+        dialog.configure(background=self.cget("background"))
+
+        state: dict[str, object] = {"current": 0, "keep_indices": set()}
+
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=2)
+        frame.rowconfigure(1, weight=1)
+
+        ttk.Label(frame, text="Conflict groups").grid(row=0, column=0, sticky="w")
+        ttk.Label(frame, text="Candidates").grid(row=0, column=1, sticky="w")
+
+        left_frame = ttk.Frame(frame)
+        right_frame = ttk.Frame(frame)
+        left_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        right_frame.grid(row=1, column=1, sticky="nsew")
+        left_frame.rowconfigure(0, weight=1)
+        left_frame.columnconfigure(0, weight=1)
+        right_frame.rowconfigure(0, weight=1)
+        right_frame.columnconfigure(0, weight=1)
+
+        group_list = tk.Listbox(
+            left_frame,
+            exportselection=False,
+            background="#1f232a",
+            foreground="#f2f4f8",
+            selectbackground="#355c8a",
+            selectforeground="#ffffff",
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        candidate_list = tk.Listbox(
+            right_frame,
+            exportselection=False,
+            background="#1f232a",
+            foreground="#f2f4f8",
+            selectbackground="#355c8a",
+            selectforeground="#ffffff",
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        group_scroll = ttk.Scrollbar(left_frame, orient="vertical", command=group_list.yview)
+        candidate_scroll = ttk.Scrollbar(right_frame, orient="vertical", command=candidate_list.yview)
+        group_list.grid(row=0, column=0, sticky="nsew")
+        group_scroll.grid(row=0, column=1, sticky="ns")
+        candidate_list.grid(row=0, column=0, sticky="nsew")
+        candidate_scroll.grid(row=0, column=1, sticky="ns")
+        group_list.configure(yscrollcommand=group_scroll.set)
+        candidate_list.configure(yscrollcommand=candidate_scroll.set)
+
+        info_var = tk.StringVar(value="Select a conflict group, then choose the candidate to keep.")
+        ttk.Label(frame, text="Target path").grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        target_path_entry = tk.Entry(
+            frame,
+            textvariable=info_var,
+            state="readonly",
+            background="#1f232a",
+            foreground="#f2f4f8",
+            readonlybackground="#1f232a",
+            insertbackground="#f2f4f8",
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        target_path_entry.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        target_path_scroll = ttk.Scrollbar(frame, orient="horizontal", command=target_path_entry.xview)
+        target_path_scroll.grid(row=4, column=0, columnspan=2, sticky="ew")
+        target_path_entry.configure(xscrollcommand=target_path_scroll.set)
+
+        button_row = ttk.Frame(frame)
+        button_row.grid(row=5, column=0, columnspan=2, sticky="e", pady=(10, 0))
+
+        def refresh_group_list() -> None:
+            group_list.delete(0, "end")
+            for index, group in enumerate(conflict_groups):
+                resolved = any(candidate.plan_index in state["keep_indices"] for candidate in group.candidates)  # type: ignore[index]
+                status = "resolved" if resolved else "pending"
+                group_list.insert("end", f"{index + 1}. {group.target_path.name} ({status})")
+            if conflict_groups:
+                group_list.selection_clear(0, "end")
+                current = min(int(state["current"]), len(conflict_groups) - 1)
+                group_list.selection_set(current)
+                group_list.see(current)
+
+        def refresh_candidate_list(group_index: int) -> None:
+            candidate_list.delete(0, "end")
+            group = conflict_groups[group_index]
+            for candidate_index, candidate in enumerate(group.candidates):
+                prefix = "✓ " if candidate.is_preferred else "  "
+                candidate_list.insert("end", f"{prefix}{candidate.label}")
+                if candidate.plan_index in state["keep_indices"]:
+                    candidate_list.selection_set(candidate_index)
+            if not candidate_list.curselection() and group.candidates:
+                preferred_index = next((i for i, candidate in enumerate(group.candidates) if candidate.is_preferred), 0)
+                candidate_list.selection_set(preferred_index)
+                candidate_list.see(preferred_index)
+            group = conflict_groups[group_index]
+            info_var.set(f"{group.target_path}")
+
+        def select_group(index: int) -> None:
+            state["current"] = index
+            refresh_group_list()
+            refresh_candidate_list(index)
+
+        def on_group_select(event: tk.Event | None = None) -> None:
+            selection = group_list.curselection()
+            if not selection:
+                return
+            select_group(selection[0])
+
+        def keep_selected() -> None:
+            selection = candidate_list.curselection()
+            if not selection:
+                self.show_error("No selection", "Choose a candidate to keep.")
+                return
+            group_index = int(state["current"])
+            group = conflict_groups[group_index]
+            candidate = group.candidates[selection[0]]
+            state["keep_indices"].add(candidate.plan_index)  # type: ignore[index]
+            refresh_group_list()
+            next_index = next((idx for idx, grp in enumerate(conflict_groups) if not any(c.plan_index in state["keep_indices"] for c in grp.candidates)), None)  # type: ignore[index]
+            if next_index is None:
+                dialog.grab_release()
+                dialog.destroy()
+                return
+            select_group(next_index)
+
+        def keep_preferred() -> None:
+            group_index = int(state["current"])
+            group = conflict_groups[group_index]
+            preferred = next((candidate for candidate in group.candidates if candidate.is_preferred), group.candidates[0])
+            state["keep_indices"].add(preferred.plan_index)  # type: ignore[index]
+            refresh_group_list()
+            next_index = next((idx for idx, grp in enumerate(conflict_groups) if not any(c.plan_index in state["keep_indices"] for c in grp.candidates)), None)  # type: ignore[index]
+            if next_index is None:
+                dialog.grab_release()
+                dialog.destroy()
+                return
+            select_group(next_index)
+
+        def cancel_dialog() -> None:
+            state["keep_indices"] = set()
+            dialog.grab_release()
+            dialog.destroy()
+
+        ttk.Button(button_row, text="Keep Selected", command=keep_selected).pack(side="right")
+        ttk.Button(button_row, text="Keep Preferred", command=keep_preferred).pack(side="right", padx=(0, 8))
+        ttk.Button(button_row, text="Cancel", command=cancel_dialog).pack(side="right", padx=(0, 8))
+
+        group_list.bind("<<ListboxSelect>>", on_group_select)
+        if conflict_groups:
+            select_group(0)
+        dialog.bind("<Escape>", lambda _event: cancel_dialog())
+        self.wait_window(dialog)
+        keep_indices = set(state["keep_indices"])  # type: ignore[arg-type]
+        return keep_indices or None
 
     def apply_renames(self) -> None:
         if not self.plan:
@@ -935,7 +1129,7 @@ class EpisodeRenamerApp(BaseTk):
         messagebox.showinfo("Undo complete", f"Reverted {count} item(s).")
         self.preview()
 
-    def _build_plan_from_form(self) -> list[RenameItem]:
+    def _build_episode_plans_from_form(self) -> list:
         folder = Path(self.folder_var.get()).expanduser()
         title = self.series_var.get().strip()
 
@@ -991,17 +1185,23 @@ class EpisodeRenamerApp(BaseTk):
                 normalize_season_folder=self.show_mode_var.get() and self.normalize_season_folder_var.get(),
                 normalize_show_nfo=self.show_mode_var.get() and self.normalize_show_nfo_var.get(),
             )
-        return flatten_plan(media_plans)
+        return media_plans
 
     def _fill_table(self, plan: list[RenameItem]) -> None:
         self.tree.delete(*self.tree.get_children())
         for index, item in enumerate(plan):
             folder_text = self._short_target_folder(item)
+            is_conflict = index in self.conflict_plan_indices
+            tag_prefix = "even" if index % 2 == 0 else "odd"
+            if is_conflict:
+                tag_prefix += "conflict"
+            if item.kind == "delete":
+                tag_prefix += "delete"
             self.tree.insert(
                 "",
                 "end",
                 iid=str(index),
-                tags=("even",) if index % 2 == 0 else ("odd",),
+                tags=(tag_prefix,),
                 values=(
                     item.kind,
                     item.old_path.name,
@@ -1013,6 +1213,10 @@ class EpisodeRenamerApp(BaseTk):
         self.tree.tag_configure("odd", background="#262b33", foreground="#f2f4f8")
         self.tree.tag_configure("evendelete", background="#33272d", foreground="#f2f4f8")
         self.tree.tag_configure("odddelete", background="#3a2c33", foreground="#f2f4f8")
+        self.tree.tag_configure("evenconflict", background="#3b2328", foreground="#ffd8dd")
+        self.tree.tag_configure("oddconflict", background="#47272d", foreground="#ffd8dd")
+        self.tree.tag_configure("evenconflictdelete", background="#4a2028", foreground="#ffd8dd")
+        self.tree.tag_configure("oddconflictdelete", background="#56262f", foreground="#ffd8dd")
         self._update_preview_details()
 
     def _set_text(self, widget: tk.Text, lines: list[tuple[str, str]]) -> None:
@@ -1043,6 +1247,7 @@ class EpisodeRenamerApp(BaseTk):
         selection = self.tree.selection()
         if not selection:
             self.preview_kind_var.set("")
+            self.preview_state_var.set("")
             self.preview_current_path_var.set("")
             self.preview_target_path_var.set("")
             self.preview_target_folder_var.set("")
@@ -1060,6 +1265,11 @@ class EpisodeRenamerApp(BaseTk):
             return
         kind, _, _, folder_text = values[:4]
         self.preview_kind_var.set(kind)
+        item_index = int(item_id)
+        if item_index in self.conflict_plan_indices:
+            self.preview_state_var.set("Conflict")
+        else:
+            self.preview_state_var.set("Ready")
         self.preview_current_path_var.set(str(plan_item.old_path))
         self.preview_target_path_var.set(str(plan_item.new_path))
         self.preview_target_folder_var.set(folder_text if folder_text else str(plan_item.new_path.parent))

@@ -6,6 +6,7 @@ from media_models import EpisodePlan, RenameItem
 from media_paths import (
     episode_target_dir,
     extract_episode_number,
+    extract_episode_number_with_suffix,
     extract_episode_span,
     extract_season_number,
     episode_stem,
@@ -100,13 +101,18 @@ def build_episode_plans(
     for offset, old_path in enumerate(files):
         episode_start = extract_episode_number(old_path, folder) if episode_from_path else None
         episode_end = None
+        episode_suffix = ""
         if episode_from_path:
-            episode_span = extract_episode_span(old_path, folder)
-            if episode_span is not None:
-                episode_start, episode_end = episode_span
+            episode_with_suffix = extract_episode_number_with_suffix(old_path, folder)
+            if episode_with_suffix is not None:
+                episode_start, episode_suffix = episode_with_suffix
+            else:
+                episode_span = extract_episode_span(old_path, folder)
+                if episode_span is not None:
+                    episode_start, episode_end = episode_span
         if episode_start is None:
             episode_start = start_episode + offset
-        new_stem = episode_stem(series_name, season, episode_start, episode_end)
+        new_stem = episode_stem(series_name, season, episode_start, episode_end, episode_suffix)
         target_dir = episode_target_dir(
             root=folder,
             old_path=old_path,

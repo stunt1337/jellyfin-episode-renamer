@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jellyfin_episode_renamer import build_episode_plans, build_movie_plans, build_multi_season_episode_plans, flatten_plan, validate_plan
+from jellyfin_episode_renamer import build_conflict_groups, build_episode_plans, build_movie_plans, build_multi_season_episode_plans, flatten_plan, validate_plan
 from media_detection import parse_movie_folder_name, parse_show_folder_name
 from rename_ops import find_stale_source_dirs
 
@@ -131,6 +131,109 @@ class PlanningTests(unittest.TestCase):
 
             video = next(item for item in plan if item.kind == "video")
             self.assertEqual(video.new_path.name, "Example Show - S01E01-E02.mkv")
+
+    def test_letter_suffixed_episode_parts_keep_unique_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / "Family.Guy.S06"
+            folder.mkdir()
+            (folder / "KjVxl5B__Family.Guy.S06E01a.German.AC3.DL.1080p.WebRip.x265-FuN.mkv").touch()
+            (folder / "KjVxl5B__Family.Guy.S06E01b.German.AC3.DL.1080p.WebRip.x265-FuN.mkv").touch()
+
+            plan = flatten_plan(
+                build_episode_plans(
+                    folder=folder,
+                    series_name="Family Guy",
+                    season=6,
+                    start_episode=1,
+                    extensions={".mkv"},
+                    recursive=False,
+                    episode_from_path=True,
+                    include_sidecars=False,
+                    flatten=False,
+                    series_year="1999",
+                    rename_show_folder=True,
+                    normalize_season_folder=True,
+                    normalize_show_nfo=True,
+                )
+            )
+
+            self.assertEqual(validate_plan(plan), [])
+            targets = [item.new_path.name for item in plan if item.kind == "video"]
+            self.assertEqual(
+                targets,
+                [
+                    "Family Guy - S06E01 Part 1.mkv",
+                    "Family Guy - S06E01 Part 2.mkv",
+                ],
+            )
+
+    def test_common_part_suffix_spellings_are_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / "Example.Show.S01"
+            folder.mkdir()
+            (folder / "Example.Show.S01E01-part1.Release.mkv").touch()
+            (folder / "Example.Show.S01E02A.Release.mkv").touch()
+            (folder / "Example.Show.S01E03-Teil1.Release.mkv").touch()
+
+            plan = flatten_plan(
+                build_episode_plans(
+                    folder=folder,
+                    series_name="Example Show",
+                    season=1,
+                    start_episode=1,
+                    extensions={".mkv"},
+                    recursive=False,
+                    episode_from_path=True,
+                    include_sidecars=False,
+                    flatten=False,
+                    series_year="2024",
+                    rename_show_folder=True,
+                    normalize_season_folder=True,
+                    normalize_show_nfo=True,
+                )
+            )
+
+            self.assertEqual(validate_plan(plan), [])
+            targets = sorted(item.new_path.name for item in plan if item.kind == "video")
+            self.assertEqual(
+                targets,
+                [
+                    "Example Show - S01E01 Part 1.mkv",
+                    "Example Show - S01E02 Part 1.mkv",
+                    "Example Show - S01E03 Part 1.mkv",
+                ],
+            )
+
+    def test_conflict_group_prefers_multi_part_episode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / "Example.Show.S01"
+            folder.mkdir()
+            (folder / "Example.Show.S01E01-E02.Release.mkv").touch()
+            (folder / "FIX_Example.Show.S01E01-E02.Release.mkv").touch()
+
+            episode_plans = build_episode_plans(
+                folder=folder,
+                series_name="Example Show",
+                season=1,
+                start_episode=1,
+                extensions={".mkv"},
+                recursive=False,
+                episode_from_path=True,
+                include_sidecars=False,
+                flatten=False,
+                series_year="2024",
+                rename_show_folder=True,
+                normalize_season_folder=True,
+                normalize_show_nfo=True,
+            )
+
+            groups = build_conflict_groups(episode_plans)
+            self.assertEqual(len(groups), 1)
+            preferred = next(candidate for candidate in groups[0].candidates if candidate.is_preferred)
+            self.assertNotIn("FIX_", preferred.label)
 
     def test_season_metadata_moves_to_season_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

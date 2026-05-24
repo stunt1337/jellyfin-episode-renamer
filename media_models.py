@@ -27,3 +27,17 @@ class EpisodePlan:
 class RenameResult:
     renamed_count: int
     removed_empty_dirs: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class ConflictCandidate:
+    plan_index: int
+    label: str
+    items: tuple[RenameItem, ...]
+    is_preferred: bool = False
+
+
+@dataclass(frozen=True)
+class ConflictGroup:
+    target_path: Path
+    candidates: tuple[ConflictCandidate, ...]
