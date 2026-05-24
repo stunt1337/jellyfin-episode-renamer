@@ -7,11 +7,12 @@ import sys
 from pathlib import Path
 
 from media_config import CONFIG_FILE, UNDO_LOG_FILE, as_bool, read_config
-from media_models import EpisodePlan, RenameItem, RenameResult
+from media_models import ConflictCandidate, ConflictGroup, EpisodePlan, RenameItem, RenameResult
 from media_paths import (
     IGNORED_FOLDER_NAMES,
     episode_target_dir,
     extract_episode_number,
+    extract_episode_span,
     extract_season_number,
     looks_like_season_path,
     looks_like_specific_season_path,
@@ -23,7 +24,16 @@ from media_paths import (
     show_target_dir,
 )
 from planners import build_episode_plans, build_movie_plans, build_multi_season_episode_plans, build_plan, detect_season_folders, flatten_plan
-from rename_ops import count_changed, delete_stale_source_dirs, find_stale_source_dirs, rename_files, undo_from_log, validate_plan
+from rename_ops import (
+    apply_conflict_resolution,
+    build_conflict_groups,
+    count_changed,
+    delete_stale_source_dirs,
+    find_stale_source_dirs,
+    rename_files,
+    undo_from_log,
+    validate_plan,
+)
 from sidecars import (
     IMAGE_EXTENSIONS,
     MOVIE_PRESERVED_IMAGE_STEMS,
@@ -59,6 +69,8 @@ __all__ = [
     "MOVIE_PRESERVED_IMAGE_STEMS",
     "SHOW_PRESERVED_IMAGE_STEMS",
     "RenameItem",
+    "ConflictCandidate",
+    "ConflictGroup",
     "EpisodePlan",
     "RenameResult",
     "as_bool",
@@ -69,6 +81,8 @@ __all__ = [
     "build_movie_plans",
     "flatten_plan",
     "validate_plan",
+    "build_conflict_groups",
+    "apply_conflict_resolution",
     "rename_files",
     "undo_from_log",
     "count_changed",
@@ -83,6 +97,7 @@ __all__ = [
     "normalize_name",
     "should_ignore",
     "extract_episode_number",
+    "extract_episode_span",
     "extract_season_number",
     "build_show_sidecar_items",
     "build_season_sidecar_items",

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 from media_config import UNDO_LOG_FILE
-from media_models import RenameItem, RenameResult
+from media_models import ConflictCandidate, ConflictGroup, EpisodePlan, RenameItem, RenameResult
 
 
 def validate_plan(plan: list[tuple[Path, Path]] | list[RenameItem]) -> list[str]:
@@ -35,6 +36,74 @@ def validate_plan(plan: list[tuple[Path, Path]] | list[RenameItem]) -> list[str]
             errors.append(f"Target already exists: {item.new_path}")
 
     return errors
+
+
+def build_conflict_groups(plans: list[EpisodePlan]) -> list[ConflictGroup]:
+    target_groups: dict[Path, list[tuple[int, EpisodePlan]]] = defaultdict(list)
+    for index, plan in enumerate(plans):
+        video = plan.video
+        if video.kind == "delete" or is_noop(video):
+            continue
+        target_groups[video.new_path.resolve()].append((index, plan))
+
+    groups: list[ConflictGroup] = []
+    for target_path, indexed_plans in sorted(target_groups.items(), key=lambda entry: str(entry[0])):
+        if len(indexed_plans) <= 1:
+            continue
+        preferred_index = choose_preferred_conflict_plan(indexed_plans)
+        candidates = tuple(
+            ConflictCandidate(
+                plan_index=index,
+                label=conflict_candidate_label(plan),
+                items=plan.all_items,
+                is_preferred=index == preferred_index,
+            )
+            for index, plan in indexed_plans
+        )
+        groups.append(ConflictGroup(target_path=target_path, candidates=candidates))
+    return groups
+
+
+def choose_preferred_conflict_plan(indexed_plans: list[tuple[int, EpisodePlan]]) -> int:
+    def score(entry: tuple[int, EpisodePlan]) -> tuple[int, int, int, str]:
+        index, plan = entry
+        video = plan.video
+        target_name = video.new_path.stem.lower()
+        multipart_bonus = 1 if ("-e" in target_name or " part " in target_name) else 0
+        fix_penalty = 1 if "fix" in video.old_path.name.lower() else 0
+        shallower_bonus = -len(video.old_path.parts)
+        return (multipart_bonus, -fix_penalty, shallower_bonus, str(video.old_path))
+
+    return max(indexed_plans, key=score)[0]
+
+
+def conflict_candidate_label(plan: EpisodePlan) -> str:
+    video = plan.video
+    stem = video.new_path.stem
+    episode_kind = conflict_episode_kind(stem)
+    suffix = f" [{episode_kind}]" if episode_kind else ""
+    if stem != video.old_path.stem:
+        return f"{video.old_path.name} -> {video.new_path.name}{suffix}"
+    return f"{video.old_path.name}{suffix}"
+
+
+def conflict_episode_kind(stem: str) -> str:
+    lower = stem.lower()
+    if re.search(r"(?i)s\d{1,2}e\d{1,3}-e\d{1,3}", lower):
+        return "Range"
+    if re.search(r"(?i)\bpart\s*\d+\b", lower):
+        return "Part"
+    if re.search(r"(?i)\bpart\b", lower):
+        return "Part"
+    return ""
+
+
+def apply_conflict_resolution(plans: list[EpisodePlan], keep_indices: set[int]) -> list[EpisodePlan]:
+    resolved: list[EpisodePlan] = []
+    for index, plan in enumerate(plans):
+        if index in keep_indices:
+            resolved.append(plan)
+    return resolved
 
 
 def normalize_plan_items(plan: list[tuple[Path, Path]] | list[RenameItem]) -> list[RenameItem]:

@@ -63,10 +63,29 @@ def movie_stem(movie_name: str, release_year: str) -> str:
     return f"{movie_name} ({year})"
 
 
-def episode_stem(series_name: str, season: int, episode_start: int, episode_end: int | None = None) -> str:
+def episode_stem(
+    series_name: str,
+    season: int,
+    episode_start: int,
+    episode_end: int | None = None,
+    episode_suffix: str = "",
+) -> str:
     if episode_end is None or episode_end == episode_start:
-        return f"{series_name} - S{season:02d}E{episode_start:02d}"
+        suffix = render_episode_suffix(episode_suffix)
+        return f"{series_name} - S{season:02d}E{episode_start:02d}{suffix}"
     return f"{series_name} - S{season:02d}E{episode_start:02d}-E{episode_end:02d}"
+
+
+def render_episode_suffix(episode_suffix: str) -> str:
+    suffix = episode_suffix.strip()
+    if not suffix:
+        return ""
+    match = re.fullmatch(r"-part(\d+)", suffix, flags=re.IGNORECASE)
+    if match:
+        return f" Part {int(match.group(1))}"
+    if suffix.startswith("-"):
+        return f" {suffix[1:].strip()}"
+    return f" {suffix}"
 
 
 def looks_like_season_path(path: Path) -> bool:
@@ -124,7 +143,67 @@ def extract_episode_number(path: Path, root: Path) -> int | None:
     if span is not None:
         return span[0]
 
+    episode = extract_episode_number_with_suffix(path, root)
+    if episode is not None:
+        return episode[0]
+
     return None
+
+
+def extract_episode_number_with_suffix(path: Path, root: Path) -> tuple[int, str] | None:
+    try:
+        search_text = str(path.relative_to(root))
+    except ValueError:
+        search_text = str(path)
+
+    patterns = [
+        r"(?i)(?:^|[^a-z0-9])s\d{1,2}e(\d{1,3})\s*(?:part|teil)\s*0*(\d{1,3})\s*(?:of|/)\s*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])s\d{1,2}e(\d{1,3})\s*[-_. ]+\s*(?:part|teil)\s*0*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])s\d{1,2}e(\d{1,3})\s*0*(\d{1,3})\s*/\s*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])\d{1,2}x(\d{1,3})\s*[-_. ]+\s*(?:part|teil)\s*0*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])\d{1,2}x(\d{1,3})\s*0*(\d{1,3})\s*/\s*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])ep[ ._-]?(\d{1,3})\s*[-_. ]+\s*(?:part|teil)\s*0*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])ep[ ._-]?(\d{1,3})\s*0*(\d{1,3})\s*/\s*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])e(\d{1,3})\s*[-_. ]+\s*(?:part|teil)\s*0*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])e(\d{1,3})\s*0*(\d{1,3})\s*/\s*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])episode[ ._-]?(\d{1,3})\s*[-_. ]+\s*(?:part|teil)\s*0*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])episode[ ._-]?(\d{1,3})\s*0*(\d{1,3})\s*/\s*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])s\d{1,2}e(\d{1,3})([a-z])(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])\d{1,2}x(\d{1,3})([a-z])(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])ep[ ._-]?(\d{1,3})([a-z])(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])e(\d{1,3})([a-z])(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])episode[ ._-]?(\d{1,3})([a-z])(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])s\d{1,2}e(\d{1,3})\s*(?:of|/)\s*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])\d{1,2}x(\d{1,3})\s*(?:of|/)\s*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])ep[ ._-]?(\d{1,3})\s*(?:of|/)\s*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])e(\d{1,3})\s*(?:of|/)\s*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])episode[ ._-]?(\d{1,3})\s*(?:of|/)\s*(\d{1,3})(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[ ._-])0*(\d{1,3})([a-z])(?:\([^/\\]*\)|[ ._-]|$)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, search_text)
+        if match:
+            if match.lastindex and match.lastindex >= 2:
+                suffix_value = match.group(2).lower()
+                if suffix_value.isalpha():
+                    suffix = f"-part{alpha_part_index(suffix_value)}"
+                else:
+                    suffix = f"-part{int(suffix_value)}"
+            else:
+                suffix = ""
+            return int(match.group(1)), suffix
+
+    return None
+
+
+def alpha_part_index(value: str) -> int:
+    total = 0
+    for char in value.lower():
+        if not char.isalpha():
+            continue
+        total = total * 26 + (ord(char) - 96)
+    return max(total, 1)
 
 
 def extract_episode_span(path: Path, root: Path) -> tuple[int, int] | None:
