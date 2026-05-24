@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.3.0 - Conflict handling and multipart episode naming
+
+### Added
+
+- Conflict-group detection with a selection dialog for duplicate target paths.
+- Preview highlighting for conflicting rows so duplicate targets are visible before applying changes.
+- Horizontal scrolling in the conflict dialog for long target paths.
+- Multipart episode support for Jellyfin-style ranges such as `S01E01-E02`.
+- Part-style episode naming for split episodes such as `S02E03 Part 1` and `S02E03 Part 2`.
+- Support for common split-episode spellings such as `E01a`, `E01b`, `Part 1 of 2`, `1/2`, and `Teil 1`.
+
+### Changed
+
+- Conflict resolution now prefers multipart candidates when they are the better match.
+- The conflict dialog labels multipart candidates as `Range` or `Part` for easier review.
+- The target path field in the conflict dialog is scrollable so long paths stay readable.
+- Show/Series preview rows now surface conflict state directly in the table.
+
 ## v1.2.0 - Presets, profiles, and preview upgrades
 
 ### Added
