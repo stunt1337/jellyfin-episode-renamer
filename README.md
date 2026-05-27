@@ -22,6 +22,7 @@ It is designed for local media libraries where episode or movie files still use 
 - Optional sidecar renaming for `.nfo`, thumbnails, and `.trickplay`
 - Optional external subtitle renaming with Jellyfin suffixes such as `.en.srt`, `.default.en.forced.ass`, and `.en.sdh.srt`
 - Optional folder flattening into one folder per episode
+- Optional media tags such as `2160p HDR HEVC EAC3 Remote`
 - Removes old source folders after renaming when they are empty
 - Undo log for the last rename operation
 - Ignores `sample`, `samples`, and `.trickplay` folders
@@ -32,6 +33,7 @@ It is designed for local media libraries where episode or movie files still use 
 
 - Python 3.10 or newer
 - Optional: `tkinterdnd2` for drag-and-drop folder support in the GUI
+- Optional: `ffprobe` from FFmpeg for **Scan Media Tags**
 
 ## Project Structure
 
@@ -45,6 +47,7 @@ media_paths.py                   Jellyfin target paths and episode detection
 media_detection.py               GUI folder detection and name parsing
 media_config.py                  Settings file parsing and shared paths
 media_models.py                  Rename plan data classes
+media_probe.py                   Optional ffprobe-based media tag detection
 tests/                           Regression tests for risky rename scenarios
 settings.example.txt             Example settings for CLI and GUI defaults
 run-gui.*                        OS-specific GUI launchers
@@ -112,9 +115,44 @@ multi_season=false
 cleanup_stale_paths=false
 flatten=false
 extensions=.mkv,.mp4,.avi,.mov,.m4v,.webm,.ts
+tag_resolution_enabled=false
+tag_resolution=2160p
+tag_hdr_enabled=false
+tag_hdr=HDR
+tag_video_codec_enabled=false
+tag_video_codec=HEVC
+tag_audio_enabled=false
+tag_audio=EAC3
+tag_custom_enabled=false
+tag_custom=Remote
+use_scanned_tags=false
+media_tags_in_folders=false
 ```
 
 After an apply run, old source folders that became empty are removed automatically. Folders that still contain unrelated files are left in place.
+
+## Optional Media Tags
+
+The GUI can append media tags to movie filenames or episode filenames:
+
+```text
+John Wick (2014) - 2160p HDR HEVC EAC3 Remote.mkv
+Example Show - S01E01 - 1080p HEVC EAC3.mkv
+```
+
+Tags can be selected manually, or detected on demand with **Scan Media Tags**. The scan uses optional `ffprobe`, writes results to `media-tag-cache.json`, and applies detected tags per file when **Use scanned tags** is enabled. Show and season folder names are not tagged.
+
+When **Flatten** is enabled, generated movie or episode folders stay untagged by default:
+
+```text
+John Wick (2014)/John Wick (2014) - 2160p HDR HEVC EAC3 Remote.mkv
+```
+
+Enable **Tags in folders** only if you also want generated folders to include the same media tags. The option is only available when **Flatten** is enabled.
+
+For ffprobe installation and scan examples, see [docs/FFPROBE_MEDIA_TAGS.md](docs/FFPROBE_MEDIA_TAGS.md).
+
+Release notes are kept in [docs/releases](docs/releases).
 
 ## Command Line Usage
 

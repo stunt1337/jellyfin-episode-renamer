@@ -73,5 +73,22 @@ cleanup_stale_paths=false
 # Empty old source folders are removed automatically after a successful apply run.
 flatten=false
 
+# Optional media tags appended to movie filenames or episode filenames.
+# These tags are not applied to show root or season folder names.
+# Example: Example Movie (2024) - 2160p HDR HEVC EAC3 Remote.mkv
+tag_resolution_enabled=false
+tag_resolution=2160p
+tag_hdr_enabled=false
+tag_hdr=HDR
+tag_video_codec_enabled=false
+tag_video_codec=HEVC
+tag_audio_enabled=false
+tag_audio=EAC3
+tag_custom_enabled=false
+tag_custom=Remote
+use_scanned_tags=false
+# Only applies when flatten=true. Adds media tags to generated folder names too.
+media_tags_in_folders=false
+
 # Supported video file extensions.
 extensions=.mkv,.mp4,.avi,.mov,.m4v,.webm,.ts

@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.4.0 - Media tags and ffprobe scanning
+
+### Added
+
+- Optional media tags for movie and episode filenames, including resolution, HDR/Dolby Vision, video codec, audio codec, and a custom tag.
+- Audio tag choices for common formats such as `EAC3`, `AC3`, `DTS`, `DTS-HD MA`, `DTS:X`, `TrueHD`, and `TrueHD Atmos`.
+- Optional on-demand **Scan Media Tags** workflow using external `ffprobe`.
+- Per-file media tag cache in `media-tag-cache.json`.
+- **Use scanned tags** toggle to apply ffprobe-detected tags in the preview.
+- **Tags in folders** toggle for flatten workflows where generated folders should also include media tags.
+- Dedicated ffprobe setup guide in `docs/FFPROBE_MEDIA_TAGS.md`.
+
+### Changed
+
+- Media tags are applied to filenames by default, not show root or season folder names.
+- Flatten-generated movie and episode folders stay untagged by default for cleaner Jellyfin folder structure.
+- Drag-and-drop or browsing to a new folder now clears the stale preview state before scanning.
+- Release notes are now grouped under `docs/releases/`.
+- `media-tag-cache.json` is ignored by Git.
+
+### Validation
+
+- `python3 -m py_compile jellyfin_episode_renamer.py jellyfin_episode_renamer_gui.py planners.py media_tags.py media_probe.py tests/test_planning.py`
+- `python3 -m unittest discover -s tests -v`
+
 ## v1.3.0 - Conflict handling and multipart episode naming
 
 ### Added

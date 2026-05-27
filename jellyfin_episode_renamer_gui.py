@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import tkinter as tk
+from dataclasses import asdict
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -32,12 +33,19 @@ from jellyfin_episode_renamer import (
     validate_plan,
 )
 from media_detection import parse_movie_folder_name, parse_show_folder_name, looks_like_season_folder
+from media_probe import MediaProbeError, probe_media_tags
+from media_tags import MediaTagOptions
 
 
 DEFAULT_EXTENSIONS = ".mkv,.mp4,.avi,.mov,.m4v,.webm,.ts"
 EXAMPLE_CONFIG_FILE = Path(__file__).with_name("settings.example.txt")
 PROFILES_FILE = Path(__file__).with_name("profiles.json")
+MEDIA_TAG_CACHE_FILE = Path(__file__).with_name("media-tag-cache.json")
 BaseTk = TkinterDnD.Tk if TkinterDnD is not None else tk.Tk
+RESOLUTION_TAGS = ("2160p", "1080p", "720p", "576p", "480p")
+HDR_TAGS = ("HDR", "HDR10", "HDR10+", "DV", "DV HDR")
+VIDEO_CODEC_TAGS = ("HEVC", "H264", "AV1", "MPEG2", "VC1")
+AUDIO_TAGS = ("EAC3", "AC3", "AAC", "DTS", "DTS-HD MA", "DTS:X", "TrueHD", "TrueHD Atmos", "FLAC")
 
 PRESET_PROFILES: dict[str, dict[str, object]] = {
     "Custom": {},
@@ -158,8 +166,8 @@ class EpisodeRenamerApp(BaseTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Jellyfin Episode Renamer")
-        self.geometry("1180x700")
-        self.minsize(980, 560)
+        self.geometry("1220x820")
+        self.minsize(1080, 700)
 
         self.plan: list[RenameItem] = []
         self.episode_plans: list = []
@@ -167,6 +175,7 @@ class EpisodeRenamerApp(BaseTk):
         self.resolved_conflict_indices: set[int] = set()
         self.conflict_plan_indices: set[int] = set()
         self._tooltips: list[Tooltip] = []
+        self.scanned_media_tags: dict[str, MediaTagOptions] = self.load_media_tag_cache()
 
         self.folder_var = tk.StringVar()
         self.series_var = tk.StringVar()
@@ -193,6 +202,18 @@ class EpisodeRenamerApp(BaseTk):
         self.multi_season_var = tk.BooleanVar(value=False)
         self.cleanup_stale_paths_var = tk.BooleanVar(value=False)
         self.flatten_var = tk.BooleanVar(value=False)
+        self.tag_resolution_enabled_var = tk.BooleanVar(value=False)
+        self.tag_resolution_var = tk.StringVar(value="2160p")
+        self.tag_hdr_enabled_var = tk.BooleanVar(value=False)
+        self.tag_hdr_var = tk.StringVar(value="HDR")
+        self.tag_video_codec_enabled_var = tk.BooleanVar(value=False)
+        self.tag_video_codec_var = tk.StringVar(value="HEVC")
+        self.tag_audio_enabled_var = tk.BooleanVar(value=False)
+        self.tag_audio_var = tk.StringVar(value="EAC3")
+        self.tag_custom_enabled_var = tk.BooleanVar(value=False)
+        self.tag_custom_var = tk.StringVar(value="Remote")
+        self.use_scanned_tags_var = tk.BooleanVar(value=False)
+        self.media_tags_in_folders_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Choose a folder and run Preview.")
 
         self._build_ui()
@@ -376,7 +397,7 @@ class EpisodeRenamerApp(BaseTk):
         sidecars_check = ttk.Checkbutton(options, text="Sidecars", variable=self.include_sidecars_var)
         sidecars_check.grid(row=0, column=1, padx=(0, 10), sticky="w")
         self.add_tooltip(sidecars_check, "Rename matching .nfo, artwork, subtitle, and trickplay sidecar files.")
-        flatten_check = ttk.Checkbutton(options, text="Flatten", variable=self.flatten_var)
+        flatten_check = ttk.Checkbutton(options, text="Flatten", variable=self.flatten_var, command=self.on_flatten_changed)
         flatten_check.grid(row=0, column=2, padx=(0, 10), sticky="w")
         self.add_tooltip(flatten_check, "Move each video into a clean folder next to the selected source folder.")
         self.normalize_movie_nfo_check = ttk.Checkbutton(
@@ -387,8 +408,84 @@ class EpisodeRenamerApp(BaseTk):
         self.normalize_movie_nfo_check.grid(row=0, column=3, sticky="w")
         self.add_tooltip(self.normalize_movie_nfo_check, "Normalize movie metadata to movie.nfo in movie mode.")
 
+        tag_frame = ttk.LabelFrame(settings, text="Optional media tags", padding=(8, 6))
+        tag_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        for column in range(10):
+            tag_frame.columnconfigure(column, weight=0)
+
+        resolution_check = ttk.Checkbutton(
+            tag_frame,
+            text="Resolution",
+            variable=self.tag_resolution_enabled_var,
+            command=self.update_media_tag_state,
+        )
+        resolution_check.grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self.tag_resolution_combo = ttk.Combobox(tag_frame, textvariable=self.tag_resolution_var, values=RESOLUTION_TAGS, state="readonly", width=8)
+        self.tag_resolution_combo.grid(row=0, column=1, sticky="w", padx=(0, 12))
+        self.add_tooltip(resolution_check, "Append the selected resolution tag to movie files or episode files only.")
+
+        hdr_check = ttk.Checkbutton(
+            tag_frame,
+            text="HDR/DV",
+            variable=self.tag_hdr_enabled_var,
+            command=self.update_media_tag_state,
+        )
+        hdr_check.grid(row=0, column=2, sticky="w", padx=(0, 4))
+        self.tag_hdr_combo = ttk.Combobox(tag_frame, textvariable=self.tag_hdr_var, values=HDR_TAGS, state="readonly", width=9)
+        self.tag_hdr_combo.grid(row=0, column=3, sticky="w", padx=(0, 12))
+
+        video_codec_check = ttk.Checkbutton(
+            tag_frame,
+            text="Video",
+            variable=self.tag_video_codec_enabled_var,
+            command=self.update_media_tag_state,
+        )
+        video_codec_check.grid(row=0, column=4, sticky="w", padx=(0, 4))
+        self.tag_video_codec_combo = ttk.Combobox(tag_frame, textvariable=self.tag_video_codec_var, values=VIDEO_CODEC_TAGS, state="readonly", width=8)
+        self.tag_video_codec_combo.grid(row=0, column=5, sticky="w", padx=(0, 12))
+
+        audio_check = ttk.Checkbutton(
+            tag_frame,
+            text="Audio",
+            variable=self.tag_audio_enabled_var,
+            command=self.update_media_tag_state,
+        )
+        audio_check.grid(row=0, column=6, sticky="w", padx=(0, 4))
+        self.tag_audio_combo = ttk.Combobox(tag_frame, textvariable=self.tag_audio_var, values=AUDIO_TAGS, state="readonly", width=13)
+        self.tag_audio_combo.grid(row=0, column=7, sticky="w", padx=(0, 12))
+        self.add_tooltip(self.tag_audio_combo, "DTS can be tagged as DTS, DTS-HD MA, or DTS:X; choose the one that matches the version you want visible.")
+
+        custom_check = ttk.Checkbutton(
+            tag_frame,
+            text="Custom",
+            variable=self.tag_custom_enabled_var,
+            command=self.update_media_tag_state,
+        )
+        custom_check.grid(row=0, column=8, sticky="w", padx=(0, 4))
+        self.tag_custom_entry = ttk.Entry(tag_frame, textvariable=self.tag_custom_var, width=14)
+        self.tag_custom_entry.grid(row=0, column=9, sticky="w")
+        self.add_tooltip(custom_check, "Append a free tag such as Remote. In Show/Series mode this is applied only to episode files, not show or season folders.")
+
+        scanned_check = ttk.Checkbutton(
+            tag_frame,
+            text="Use scanned tags",
+            variable=self.use_scanned_tags_var,
+            command=self.preview_if_ready,
+        )
+        scanned_check.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.add_tooltip(scanned_check, "Use ffprobe-detected tags per file when a cached scan result is available.")
+        ttk.Button(tag_frame, text="Scan Media Tags", command=self.scan_media_tags).grid(row=1, column=2, columnspan=2, sticky="w", pady=(6, 0))
+        self.tags_in_folders_check = ttk.Checkbutton(
+            tag_frame,
+            text="Tags in folders",
+            variable=self.media_tags_in_folders_var,
+            command=self.on_tags_in_folders_changed,
+        )
+        self.tags_in_folders_check.grid(row=1, column=4, columnspan=2, sticky="w", padx=(12, 0), pady=(6, 0))
+        self.add_tooltip(self.tags_in_folders_check, "Only available with Flatten. Include media tags in generated movie or episode folder names too.")
+
         actions = ttk.Frame(settings)
-        actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        actions.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         ttk.Button(actions, text="Preview", command=self.preview).pack(side="left")
         ttk.Button(actions, text="Apply Renames", command=self.apply_renames).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Undo Last", command=self.undo_last).pack(side="left", padx=(8, 0))
@@ -502,6 +599,7 @@ class EpisodeRenamerApp(BaseTk):
         if folder:
             self.folder_var.set(folder)
             self.autofill_fields_from_folder(Path(folder))
+            self.clear_preview_state()
 
     def enable_folder_drop(self) -> None:
         if DND_FILES is None:
@@ -519,7 +617,17 @@ class EpisodeRenamerApp(BaseTk):
         self.folder_var.set(str(path))
         self.autofill_fields_from_folder(path)
         self.folder_entry.xview_moveto(1.0)
+        self.clear_preview_state()
         self.status_var.set("Folder set from dropped path.")
+
+    def clear_preview_state(self) -> None:
+        self.plan = []
+        self.episode_plans = []
+        self.conflict_groups = []
+        self.conflict_plan_indices = set()
+        self.resolved_conflict_indices = set()
+        self.tree.delete(*self.tree.get_children())
+        self._update_preview_details()
 
     def autofill_fields_from_folder(self, folder: Path) -> None:
         if self.movie_mode_var.get():
@@ -587,7 +695,20 @@ class EpisodeRenamerApp(BaseTk):
         self.multi_season_var.set(config.get("multi_season", "false").lower() in {"1", "true", "yes", "y"})
         self.cleanup_stale_paths_var.set(config.get("cleanup_stale_paths", "false").lower() in {"1", "true", "yes", "y"})
         self.flatten_var.set(config.get("flatten", "false").lower() in {"1", "true", "yes", "y"})
+        self.tag_resolution_enabled_var.set(config.get("tag_resolution_enabled", "false").lower() in {"1", "true", "yes", "y"})
+        self.tag_resolution_var.set(config.get("tag_resolution", self.tag_resolution_var.get()) or self.tag_resolution_var.get())
+        self.tag_hdr_enabled_var.set(config.get("tag_hdr_enabled", "false").lower() in {"1", "true", "yes", "y"})
+        self.tag_hdr_var.set(config.get("tag_hdr", self.tag_hdr_var.get()) or self.tag_hdr_var.get())
+        self.tag_video_codec_enabled_var.set(config.get("tag_video_codec_enabled", "false").lower() in {"1", "true", "yes", "y"})
+        self.tag_video_codec_var.set(config.get("tag_video_codec", self.tag_video_codec_var.get()) or self.tag_video_codec_var.get())
+        self.tag_audio_enabled_var.set(config.get("tag_audio_enabled", "false").lower() in {"1", "true", "yes", "y"})
+        self.tag_audio_var.set(config.get("tag_audio", self.tag_audio_var.get()) or self.tag_audio_var.get())
+        self.tag_custom_enabled_var.set(config.get("tag_custom_enabled", "false").lower() in {"1", "true", "yes", "y"})
+        self.tag_custom_var.set(config.get("tag_custom", self.tag_custom_var.get()) or self.tag_custom_var.get())
+        self.use_scanned_tags_var.set(config.get("use_scanned_tags", "false").lower() in {"1", "true", "yes", "y"})
+        self.media_tags_in_folders_var.set(config.get("media_tags_in_folders", "false").lower() in {"1", "true", "yes", "y"})
         self.update_mode_state()
+        self.update_media_tag_state()
         self.preset_var.set("Custom")
         self.status_var.set("Settings loaded.")
 
@@ -713,6 +834,18 @@ class EpisodeRenamerApp(BaseTk):
             "multi_season": self.multi_season_var.get(),
             "cleanup_stale_paths": self.cleanup_stale_paths_var.get(),
             "flatten": self.flatten_var.get(),
+            "tag_resolution_enabled": self.tag_resolution_enabled_var.get(),
+            "tag_resolution": self.tag_resolution_var.get(),
+            "tag_hdr_enabled": self.tag_hdr_enabled_var.get(),
+            "tag_hdr": self.tag_hdr_var.get(),
+            "tag_video_codec_enabled": self.tag_video_codec_enabled_var.get(),
+            "tag_video_codec": self.tag_video_codec_var.get(),
+            "tag_audio_enabled": self.tag_audio_enabled_var.get(),
+            "tag_audio": self.tag_audio_var.get(),
+            "tag_custom_enabled": self.tag_custom_enabled_var.get(),
+            "tag_custom": self.tag_custom_var.get(),
+            "use_scanned_tags": self.use_scanned_tags_var.get(),
+            "media_tags_in_folders": self.media_tags_in_folders_var.get(),
         }
 
     def apply_settings_dict(self, settings: dict[str, object]) -> None:
@@ -734,7 +867,20 @@ class EpisodeRenamerApp(BaseTk):
         self.multi_season_var.set(bool(settings.get("multi_season", self.multi_season_var.get())))
         self.cleanup_stale_paths_var.set(bool(settings.get("cleanup_stale_paths", self.cleanup_stale_paths_var.get())))
         self.flatten_var.set(bool(settings.get("flatten", self.flatten_var.get())))
+        self.tag_resolution_enabled_var.set(bool(settings.get("tag_resolution_enabled", self.tag_resolution_enabled_var.get())))
+        self.tag_resolution_var.set(str(settings.get("tag_resolution", self.tag_resolution_var.get())))
+        self.tag_hdr_enabled_var.set(bool(settings.get("tag_hdr_enabled", self.tag_hdr_enabled_var.get())))
+        self.tag_hdr_var.set(str(settings.get("tag_hdr", self.tag_hdr_var.get())))
+        self.tag_video_codec_enabled_var.set(bool(settings.get("tag_video_codec_enabled", self.tag_video_codec_enabled_var.get())))
+        self.tag_video_codec_var.set(str(settings.get("tag_video_codec", self.tag_video_codec_var.get())))
+        self.tag_audio_enabled_var.set(bool(settings.get("tag_audio_enabled", self.tag_audio_enabled_var.get())))
+        self.tag_audio_var.set(str(settings.get("tag_audio", self.tag_audio_var.get())))
+        self.tag_custom_enabled_var.set(bool(settings.get("tag_custom_enabled", self.tag_custom_enabled_var.get())))
+        self.tag_custom_var.set(str(settings.get("tag_custom", self.tag_custom_var.get())))
+        self.use_scanned_tags_var.set(bool(settings.get("use_scanned_tags", self.use_scanned_tags_var.get())))
+        self.media_tags_in_folders_var.set(bool(settings.get("media_tags_in_folders", self.media_tags_in_folders_var.get())))
         self.update_mode_state()
+        self.update_media_tag_state()
 
     def apply_selected_preset(self) -> None:
         preset_name = self.preset_var.get()
@@ -799,6 +945,26 @@ class EpisodeRenamerApp(BaseTk):
         self.normalize_season_folder_check.configure(state=show_state)
         self.multi_season_check.configure(state=show_state)
         self.cleanup_stale_paths_check.configure(state=show_state)
+        self.update_media_tag_state()
+
+    def update_media_tag_state(self) -> None:
+        self.tag_resolution_combo.configure(state="readonly" if self.tag_resolution_enabled_var.get() else "disabled")
+        self.tag_hdr_combo.configure(state="readonly" if self.tag_hdr_enabled_var.get() else "disabled")
+        self.tag_video_codec_combo.configure(state="readonly" if self.tag_video_codec_enabled_var.get() else "disabled")
+        self.tag_audio_combo.configure(state="readonly" if self.tag_audio_enabled_var.get() else "disabled")
+        self.tag_custom_entry.configure(state="normal" if self.tag_custom_enabled_var.get() else "disabled")
+        if not self.flatten_var.get():
+            self.media_tags_in_folders_var.set(False)
+        self.tags_in_folders_check.configure(state="normal" if self.flatten_var.get() else "disabled")
+
+    def on_flatten_changed(self) -> None:
+        self.update_media_tag_state()
+        self.preview_if_ready()
+
+    def on_tags_in_folders_changed(self) -> None:
+        if not self.flatten_var.get():
+            self.media_tags_in_folders_var.set(False)
+        self.preview_if_ready()
 
     def save_settings(self) -> None:
         content = "\n".join(
@@ -823,12 +989,74 @@ class EpisodeRenamerApp(BaseTk):
                 f"multi_season={str(self.multi_season_var.get()).lower()}",
                 f"cleanup_stale_paths={str(self.cleanup_stale_paths_var.get()).lower()}",
                 f"flatten={str(self.flatten_var.get()).lower()}",
+                f"tag_resolution_enabled={str(self.tag_resolution_enabled_var.get()).lower()}",
+                f"tag_resolution={self.tag_resolution_var.get()}",
+                f"tag_hdr_enabled={str(self.tag_hdr_enabled_var.get()).lower()}",
+                f"tag_hdr={self.tag_hdr_var.get()}",
+                f"tag_video_codec_enabled={str(self.tag_video_codec_enabled_var.get()).lower()}",
+                f"tag_video_codec={self.tag_video_codec_var.get()}",
+                f"tag_audio_enabled={str(self.tag_audio_enabled_var.get()).lower()}",
+                f"tag_audio={self.tag_audio_var.get()}",
+                f"tag_custom_enabled={str(self.tag_custom_enabled_var.get()).lower()}",
+                f"tag_custom={self.tag_custom_var.get()}",
+                f"use_scanned_tags={str(self.use_scanned_tags_var.get()).lower()}",
+                f"media_tags_in_folders={str(self.media_tags_in_folders_var.get()).lower()}",
                 f"extensions={self.extensions_var.get()}",
                 "",
             ]
         )
         CONFIG_FILE.write_text(content, encoding="utf-8")
         self.status_var.set("Settings saved.")
+
+    def preview_if_ready(self) -> None:
+        if self.plan:
+            self.preview()
+
+    def load_media_tag_cache(self) -> dict[str, MediaTagOptions]:
+        if not MEDIA_TAG_CACHE_FILE.exists():
+            return {}
+        try:
+            data = json.loads(MEDIA_TAG_CACHE_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        cache: dict[str, MediaTagOptions] = {}
+        for path, value in data.items():
+            if isinstance(path, str) and isinstance(value, dict):
+                cache[path] = MediaTagOptions(**{key: value.get(key, default) for key, default in asdict(MediaTagOptions()).items()})
+        return cache
+
+    def write_media_tag_cache(self) -> None:
+        data = {path: asdict(options) for path, options in sorted(self.scanned_media_tags.items())}
+        MEDIA_TAG_CACHE_FILE.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+    def scan_media_tags(self) -> None:
+        self.preview()
+        if not self.plan:
+            return
+
+        video_items = [item for item in self.plan if item.kind in {"movie", "video"} and item.old_path.exists()]
+        if not video_items:
+            self.show_error("No video files", "No video files are available in the current preview.")
+            return
+
+        errors: list[str] = []
+        for index, item in enumerate(video_items, start=1):
+            self.status_var.set(f"Scanning media tags {index}/{len(video_items)}: {item.old_path.name}")
+            self.update_idletasks()
+            try:
+                self.scanned_media_tags[str(item.old_path)] = probe_media_tags(item.old_path)
+            except MediaProbeError as error:
+                errors.append(str(error))
+
+        self.write_media_tag_cache()
+        self.use_scanned_tags_var.set(True)
+        self.preview()
+        if errors:
+            self.show_error("Some scans failed", "\n".join(errors[:20]))
+        else:
+            self.status_var.set(f"Scanned media tags for {len(video_items)} file(s).")
 
     def preview(self) -> None:
         try:
@@ -1148,6 +1376,8 @@ class EpisodeRenamerApp(BaseTk):
                 include_sidecars=self.include_sidecars_var.get(),
                 flatten=self.flatten_var.get(),
                 normalize_movie_nfo=self.normalize_movie_nfo_var.get(),
+                media_tags=self.current_media_tag_resolver(),
+                media_tags_in_folders=self.media_tags_in_folders_var.get(),
             )
         elif self.show_mode_var.get() and self.multi_season_var.get():
             media_plans = build_multi_season_episode_plans(
@@ -1162,6 +1392,8 @@ class EpisodeRenamerApp(BaseTk):
                 rename_show_folder=self.rename_show_folder_var.get(),
                 normalize_season_folder=self.normalize_season_folder_var.get(),
                 normalize_show_nfo=self.normalize_show_nfo_var.get(),
+                media_tags=self.current_media_tag_resolver(),
+                media_tags_in_folders=self.media_tags_in_folders_var.get(),
             )
         else:
             try:
@@ -1184,8 +1416,51 @@ class EpisodeRenamerApp(BaseTk):
                 rename_show_folder=self.show_mode_var.get() and self.rename_show_folder_var.get(),
                 normalize_season_folder=self.show_mode_var.get() and self.normalize_season_folder_var.get(),
                 normalize_show_nfo=self.show_mode_var.get() and self.normalize_show_nfo_var.get(),
+                media_tags=self.current_media_tag_resolver(),
+                media_tags_in_folders=self.media_tags_in_folders_var.get(),
             )
         return media_plans
+
+    def current_media_tag_options(self) -> MediaTagOptions:
+        return MediaTagOptions(
+            include_resolution=self.tag_resolution_enabled_var.get(),
+            resolution=self.tag_resolution_var.get(),
+            include_hdr=self.tag_hdr_enabled_var.get(),
+            hdr=self.tag_hdr_var.get(),
+            include_video_codec=self.tag_video_codec_enabled_var.get(),
+            video_codec=self.tag_video_codec_var.get(),
+            include_audio=self.tag_audio_enabled_var.get(),
+            audio=self.tag_audio_var.get(),
+            include_custom=self.tag_custom_enabled_var.get(),
+            custom=self.tag_custom_var.get(),
+        )
+
+    def current_media_tag_resolver(self):
+        manual = self.current_media_tag_options()
+        if not self.use_scanned_tags_var.get():
+            return manual
+
+        def resolve(path: Path) -> MediaTagOptions:
+            scanned = self.scanned_media_tags.get(str(path))
+            if scanned is None:
+                return manual
+            return self.merge_scanned_and_manual_tags(scanned, manual)
+
+        return resolve
+
+    def merge_scanned_and_manual_tags(self, scanned: MediaTagOptions, manual: MediaTagOptions) -> MediaTagOptions:
+        return MediaTagOptions(
+            include_resolution=scanned.include_resolution or manual.include_resolution,
+            resolution=scanned.resolution or manual.resolution,
+            include_hdr=scanned.include_hdr or manual.include_hdr,
+            hdr=scanned.hdr or manual.hdr,
+            include_video_codec=scanned.include_video_codec or manual.include_video_codec,
+            video_codec=scanned.video_codec or manual.video_codec,
+            include_audio=scanned.include_audio or manual.include_audio,
+            audio=scanned.audio or manual.audio,
+            include_custom=manual.include_custom,
+            custom=manual.custom,
+        )
 
     def _fill_table(self, plan: list[RenameItem]) -> None:
         self.tree.delete(*self.tree.get_children())

@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 settings.txt
 rename-log.json
+media-tag-cache.json
 *.log
 *.bak
 *.tmp

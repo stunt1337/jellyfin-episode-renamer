@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
+from media_tags import MediaTagOptions, append_media_tags
 from media_models import EpisodePlan, RenameItem
 from media_paths import (
     episode_target_dir,
@@ -22,6 +24,8 @@ from sidecars import (
     build_show_sidecar_items,
     build_sidecar_items,
 )
+
+MediaTagResolver = Callable[[Path], MediaTagOptions | None]
 
 
 def build_plan(
@@ -65,6 +69,8 @@ def build_episode_plans(
     normalize_season_folder: bool = False,
     normalize_show_nfo: bool = False,
     include_show_sidecars: bool = True,
+    media_tags: MediaTagOptions | MediaTagResolver | None = None,
+    media_tags_in_folders: bool = False,
 ) -> list[EpisodePlan]:
     iterator = folder.rglob("*") if recursive else folder.iterdir()
     files = sorted(
@@ -112,11 +118,14 @@ def build_episode_plans(
                     episode_start, episode_end = episode_span
         if episode_start is None:
             episode_start = start_episode + offset
-        new_stem = episode_stem(series_name, season, episode_start, episode_end, episode_suffix)
+        base_stem = episode_stem(series_name, season, episode_start, episode_end, episode_suffix)
+        path_media_tags = media_tags_for_path(media_tags, old_path)
+        new_stem = append_media_tags(base_stem, path_media_tags)
+        folder_stem = new_stem if media_tags_in_folders else base_stem
         target_dir = episode_target_dir(
             root=folder,
             old_path=old_path,
-            new_stem=new_stem,
+            new_stem=folder_stem,
             series_name=series_name,
             series_year=series_year,
             season=season,
@@ -185,6 +194,8 @@ def build_multi_season_episode_plans(
     rename_show_folder: bool = False,
     normalize_season_folder: bool = False,
     normalize_show_nfo: bool = False,
+    media_tags: MediaTagOptions | MediaTagResolver | None = None,
+    media_tags_in_folders: bool = False,
 ) -> list[EpisodePlan]:
     season_folders = detect_season_folders(folder, extensions)
     plans: list[EpisodePlan] = []
@@ -205,6 +216,8 @@ def build_multi_season_episode_plans(
                 normalize_season_folder=normalize_season_folder,
                 normalize_show_nfo=normalize_show_nfo,
                 include_show_sidecars=index == 0,
+                media_tags=media_tags,
+                media_tags_in_folders=media_tags_in_folders,
             )
         )
     return plans
@@ -242,6 +255,8 @@ def build_movie_plans(
     include_sidecars: bool,
     flatten: bool,
     normalize_movie_nfo: bool = False,
+    media_tags: MediaTagOptions | MediaTagResolver | None = None,
+    media_tags_in_folders: bool = False,
 ) -> list[EpisodePlan]:
     iterator = folder.rglob("*") if recursive else folder.iterdir()
     files = sorted(
@@ -254,10 +269,12 @@ def build_movie_plans(
         key=natural_key,
     )
 
-    new_stem = movie_stem(movie_name, release_year)
+    base_stem = movie_stem(movie_name, release_year)
     plans: list[EpisodePlan] = []
     for old_path in files:
-        target_dir = folder.parent / new_stem if flatten else old_path.parent
+        new_stem = append_media_tags(base_stem, media_tags_for_path(media_tags, old_path))
+        folder_stem = new_stem if media_tags_in_folders else base_stem
+        target_dir = folder.parent / folder_stem if flatten else old_path.parent
         video_item = RenameItem(
             old_path=old_path,
             new_path=target_dir / f"{new_stem}{old_path.suffix.lower()}",
@@ -271,6 +288,15 @@ def build_movie_plans(
         plans.append(EpisodePlan(video=video_item, sidecars=sidecars))
 
     return plans
+
+
+def media_tags_for_path(
+    media_tags: MediaTagOptions | MediaTagResolver | None,
+    path: Path,
+) -> MediaTagOptions | None:
+    if callable(media_tags):
+        return media_tags(path)
+    return media_tags
 
 
 def flatten_plan(plans: list[EpisodePlan]) -> list[RenameItem]:
