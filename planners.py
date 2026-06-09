@@ -15,6 +15,7 @@ from media_paths import (
     movie_stem,
     natural_key,
     should_ignore,
+    show_folder_name,
     show_target_dir,
 )
 from sidecars import (
@@ -71,6 +72,7 @@ def build_episode_plans(
     include_show_sidecars: bool = True,
     media_tags: MediaTagOptions | MediaTagResolver | None = None,
     media_tags_in_folders: bool = False,
+    split_versions: bool = False,
 ) -> list[EpisodePlan]:
     iterator = folder.rglob("*") if recursive else folder.iterdir()
     files = sorted(
@@ -88,7 +90,7 @@ def build_episode_plans(
     show_sidecars: list[RenameItem] = []
     season_sidecars: list[RenameItem] = []
     show_dir = show_target_dir(folder, series_name, series_year, season, rename_show_folder, normalize_season_folder)
-    if include_sidecars and include_show_sidecars and (rename_show_folder or normalize_season_folder):
+    if include_sidecars and not split_versions and include_show_sidecars and (rename_show_folder or normalize_season_folder):
         show_sidecars = build_show_sidecar_items(
             folder=folder,
             target_dir=show_dir,
@@ -96,7 +98,7 @@ def build_episode_plans(
             normalize_show_nfo=normalize_show_nfo,
         )
         planned_sidecar_sources.update(item.old_path for item in show_sidecars)
-    if include_sidecars and normalize_season_folder:
+    if include_sidecars and not split_versions and normalize_season_folder:
         season_sidecars = build_season_sidecar_items(
             folder=folder,
             target_dir=show_dir / f"Season {season:02d}",
@@ -122,17 +124,26 @@ def build_episode_plans(
         path_media_tags = media_tags_for_path(media_tags, old_path)
         new_stem = append_media_tags(base_stem, path_media_tags)
         folder_stem = new_stem if media_tags_in_folders else base_stem
-        target_dir = episode_target_dir(
-            root=folder,
-            old_path=old_path,
-            new_stem=folder_stem,
-            series_name=series_name,
-            series_year=series_year,
-            season=season,
-            flatten=flatten,
-            rename_show_folder=rename_show_folder,
-            normalize_season_folder=normalize_season_folder,
-        )
+        if split_versions:
+            target_dir = episode_version_target_dir(
+                root=folder,
+                series_name=series_name,
+                series_year=series_year,
+                season=season,
+                media_tags=path_media_tags,
+            )
+        else:
+            target_dir = episode_target_dir(
+                root=folder,
+                old_path=old_path,
+                new_stem=folder_stem,
+                series_name=series_name,
+                series_year=series_year,
+                season=season,
+                flatten=flatten,
+                rename_show_folder=rename_show_folder,
+                normalize_season_folder=normalize_season_folder,
+            )
         video_item = RenameItem(
             old_path=old_path,
             new_path=target_dir / f"{new_stem}{old_path.suffix.lower()}",
@@ -196,6 +207,7 @@ def build_multi_season_episode_plans(
     normalize_show_nfo: bool = False,
     media_tags: MediaTagOptions | MediaTagResolver | None = None,
     media_tags_in_folders: bool = False,
+    split_versions: bool = False,
 ) -> list[EpisodePlan]:
     season_folders = detect_season_folders(folder, extensions)
     plans: list[EpisodePlan] = []
@@ -218,6 +230,7 @@ def build_multi_season_episode_plans(
                 include_show_sidecars=index == 0,
                 media_tags=media_tags,
                 media_tags_in_folders=media_tags_in_folders,
+                split_versions=split_versions,
             )
         )
     return plans
@@ -257,6 +270,7 @@ def build_movie_plans(
     normalize_movie_nfo: bool = False,
     media_tags: MediaTagOptions | MediaTagResolver | None = None,
     media_tags_in_folders: bool = False,
+    split_versions: bool = False,
 ) -> list[EpisodePlan]:
     iterator = folder.rglob("*") if recursive else folder.iterdir()
     files = sorted(
@@ -272,19 +286,24 @@ def build_movie_plans(
     base_stem = movie_stem(movie_name, release_year)
     plans: list[EpisodePlan] = []
     for old_path in files:
-        new_stem = append_media_tags(base_stem, media_tags_for_path(media_tags, old_path))
+        path_media_tags = media_tags_for_path(media_tags, old_path)
+        new_stem = append_media_tags(base_stem, path_media_tags)
         folder_stem = new_stem if media_tags_in_folders else base_stem
-        target_dir = folder.parent / folder_stem if flatten else old_path.parent
+        if split_versions:
+            target_dir = folder.parent / append_media_tags(base_stem, path_media_tags)
+        else:
+            target_dir = folder.parent / folder_stem if flatten else old_path.parent
         video_item = RenameItem(
             old_path=old_path,
             new_path=target_dir / f"{new_stem}{old_path.suffix.lower()}",
             kind="movie",
         )
-        sidecars = (
-            tuple(build_movie_sidecar_items(old_path, target_dir, new_stem, normalize_movie_nfo))
-            if include_sidecars
-            else ()
-        )
+        if include_sidecars and split_versions:
+            sidecars = tuple(build_sidecar_items(old_path, target_dir, new_stem))
+        elif include_sidecars:
+            sidecars = tuple(build_movie_sidecar_items(old_path, target_dir, new_stem, normalize_movie_nfo))
+        else:
+            sidecars = ()
         plans.append(EpisodePlan(video=video_item, sidecars=sidecars))
 
     return plans
@@ -297,6 +316,19 @@ def media_tags_for_path(
     if callable(media_tags):
         return media_tags(path)
     return media_tags
+
+
+def episode_version_target_dir(
+    root: Path,
+    series_name: str,
+    series_year: str,
+    season: int,
+    media_tags: MediaTagOptions | None,
+) -> Path:
+    selected_is_season = extract_season_number(root) == season
+    show_parent = root.parent.parent if selected_is_season else root.parent
+    versioned_show = append_media_tags(show_folder_name(series_name, series_year), media_tags)
+    return show_parent / versioned_show / f"Season {season:02d}"
 
 
 def flatten_plan(plans: list[EpisodePlan]) -> list[RenameItem]:

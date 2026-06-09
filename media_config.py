@@ -5,6 +5,7 @@ from pathlib import Path
 
 CONFIG_FILE = Path(__file__).with_name("settings.txt")
 UNDO_LOG_FILE = Path(__file__).with_name("rename-log.json")
+RENAME_HISTORY_FILE = Path(__file__).with_name("rename-history.json")
 
 
 def read_config(path: Path) -> dict[str, str]:

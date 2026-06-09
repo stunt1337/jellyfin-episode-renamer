@@ -4,7 +4,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jellyfin_episode_renamer import build_conflict_groups, build_episode_plans, build_movie_plans, build_multi_season_episode_plans, flatten_plan, validate_plan
+from jellyfin_episode_renamer import (
+    RenameItem,
+    build_batch_jobs,
+    build_conflict_groups,
+    build_episode_plans,
+    build_movie_plans,
+    build_multi_season_episode_plans,
+    build_plan_warnings,
+    build_structure_report,
+    flatten_plan,
+    rename_files,
+    rename_history_runs,
+    undo_from_history,
+    validate_plan,
+)
 from media_detection import parse_movie_folder_name, parse_show_folder_name
 from media_probe import tags_from_ffprobe_data
 from media_tags import MediaTagOptions
@@ -12,6 +26,57 @@ from rename_ops import find_stale_source_dirs
 
 
 class PlanningTests(unittest.TestCase):
+    def test_plan_warnings_detect_duplicate_episode_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            first = RenameItem(folder / "a.mkv", folder / "Season 01" / "Show - S01E01.mkv", "video")
+            second = RenameItem(folder / "b.mkv", folder / "Season 01" / "Show - S01E01 - 1080p.mkv", "video")
+
+            warnings = build_plan_warnings([first, second])
+
+            self.assertTrue(any(warning.title == "Multiple episode targets: S01E01" for warning in warnings))
+
+    def test_batch_jobs_build_movie_plans_for_child_folders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            movie = root / "Example Movie (2024)"
+            movie.mkdir()
+            (movie / "release.mkv").touch()
+
+            jobs = build_batch_jobs(
+                root=root,
+                movie_mode=True,
+                extensions={".mkv"},
+                recursive=False,
+                include_sidecars=False,
+                flatten=True,
+            )
+
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(jobs[0].title, "Example Movie")
+            self.assertEqual(jobs[0].year, "2024")
+            self.assertEqual(jobs[0].status, "ok")
+            self.assertEqual(jobs[0].items[0].new_path.name, "Example Movie (2024).mkv")
+
+    def test_rename_history_can_undo_specific_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "old.mkv"
+            target = root / "new.mkv"
+            undo_log = root / "rename-log.json"
+            history_log = root / "rename-history.json"
+            source.touch()
+
+            rename_files([RenameItem(source, target, "video")], undo_log=undo_log)
+
+            runs = rename_history_runs(history_log)
+            self.assertEqual(len(runs), 1)
+            count = undo_from_history(str(runs[0]["run_id"]), history_log=history_log)
+
+            self.assertEqual(count, 1)
+            self.assertTrue(source.exists())
+            self.assertFalse(target.exists())
+
     def test_media_tag_resolver_can_return_per_file_tags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
@@ -254,6 +319,125 @@ class PlanningTests(unittest.TestCase):
                 video.new_path.relative_to(folder),
                 Path("Example Show - S01E01 - 1080p EAC3") / "Example Show - S01E01 - 1080p EAC3.mkv",
             )
+
+    def test_show_versions_can_be_split_into_tagged_show_folders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            show_root = root / "Spider Noir (2026)"
+            season = show_root / "Season 01"
+            season.mkdir(parents=True)
+            hd = season / "Spider Noir - S01E01 - 1080p H264 EAC3.mkv"
+            uhd = season / "Spider Noir - S01E01 - 2160p DV HDR HEVC EAC3.mkv"
+            hd.touch()
+            uhd.touch()
+            tags = {
+                hd: MediaTagOptions(include_resolution=True, resolution="1080p", include_video_codec=True, video_codec="H264", include_audio=True, audio="EAC3"),
+                uhd: MediaTagOptions(include_resolution=True, resolution="2160p", include_hdr=True, hdr="DV HDR", include_video_codec=True, video_codec="HEVC", include_audio=True, audio="EAC3"),
+            }
+
+            plan = flatten_plan(
+                build_multi_season_episode_plans(
+                    folder=show_root,
+                    series_name="Spider Noir",
+                    start_episode=1,
+                    extensions={".mkv"},
+                    recursive=True,
+                    include_sidecars=False,
+                    flatten=False,
+                    series_year="2026",
+                    rename_show_folder=True,
+                    normalize_season_folder=True,
+                    normalize_show_nfo=True,
+                    media_tags=lambda path: tags[path],
+                    split_versions=True,
+                )
+            )
+
+            targets = {item.new_path.relative_to(root) for item in plan if item.kind == "video"}
+            self.assertEqual(
+                targets,
+                {
+                    Path("Spider Noir (2026) - 1080p H264 EAC3") / "Season 01" / "Spider Noir - S01E01 - 1080p H264 EAC3.mkv",
+                    Path("Spider Noir (2026) - 2160p DV HDR HEVC EAC3") / "Season 01" / "Spider Noir - S01E01 - 2160p DV HDR HEVC EAC3.mkv",
+                },
+            )
+
+    def test_movie_versions_can_be_split_into_tagged_movie_folders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / "John Wick (2014)"
+            folder.mkdir()
+            hd = folder / "John Wick (2014) - 1080p H264 EAC3.mkv"
+            uhd = folder / "John Wick (2014) - 2160p HEVC EAC3.mkv"
+            hd.touch()
+            uhd.touch()
+            tags = {
+                hd: MediaTagOptions(include_resolution=True, resolution="1080p", include_video_codec=True, video_codec="H264", include_audio=True, audio="EAC3"),
+                uhd: MediaTagOptions(include_resolution=True, resolution="2160p", include_video_codec=True, video_codec="HEVC", include_audio=True, audio="EAC3"),
+            }
+
+            plan = flatten_plan(
+                build_movie_plans(
+                    folder=folder,
+                    movie_name="John Wick",
+                    release_year="2014",
+                    extensions={".mkv"},
+                    recursive=False,
+                    include_sidecars=False,
+                    flatten=False,
+                    normalize_movie_nfo=False,
+                    media_tags=lambda path: tags[path],
+                    split_versions=True,
+                )
+            )
+
+            targets = {item.new_path.relative_to(root) for item in plan if item.kind == "movie"}
+            self.assertEqual(
+                targets,
+                {
+                    Path("John Wick (2014) - 1080p H264 EAC3") / "John Wick (2014) - 1080p H264 EAC3.mkv",
+                    Path("John Wick (2014) - 2160p HEVC EAC3") / "John Wick (2014) - 2160p HEVC EAC3.mkv",
+                },
+            )
+
+    def test_plan_validation_rejects_one_source_moved_to_multiple_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "poster.jpg"
+            source.touch()
+            errors = validate_plan(
+                [
+                    RenameItem(source, root / "Movie A" / "poster.jpg", "image"),
+                    RenameItem(source, root / "Movie B" / "poster.jpg", "image"),
+                ]
+            )
+
+            self.assertTrue(any("Source path would be moved to multiple targets" in error for error in errors))
+
+    def test_structure_check_warns_about_duplicate_episode_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            season = root / "Spider Noir (2026)" / "Season 01"
+            season.mkdir(parents=True)
+            (season / "Spider Noir - S01E01 - 1080p H264 EAC3.mkv").touch()
+            (season / "Spider Noir - S01E01 - 2160p DV HDR HEVC EAC3.mkv").touch()
+
+            issues = build_structure_report(root, {".mkv"})
+
+            self.assertTrue(any("Multiple episode versions" in issue.title for issue in issues))
+
+    def test_structure_check_ignores_matching_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            season = root / "Example Show" / "Season 01"
+            season.mkdir(parents=True)
+            (season / "Example Show - S01E01.mkv").touch()
+            (season / "Example Show - S01E01.nfo").touch()
+            (season / "Example Show - S01E01-thumb.jpg").touch()
+
+            issues = build_structure_report(root, {".mkv"})
+
+            self.assertFalse(any("Sidecar without matching video" in issue.title for issue in issues))
 
     def test_movie_duplicate_trickplay_keeps_newest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

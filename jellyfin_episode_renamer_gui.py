@@ -32,9 +32,12 @@ from jellyfin_episode_renamer import (
     undo_from_log,
     validate_plan,
 )
+from batch_ops import BatchJob, build_batch_jobs
+from plan_warnings import PlanWarning, build_plan_warnings, format_plan_warnings
 from media_detection import parse_movie_folder_name, parse_show_folder_name, looks_like_season_folder
 from media_probe import MediaProbeError, probe_media_tags
 from media_tags import MediaTagOptions
+from structure_check import build_structure_report, format_structure_report
 
 
 DEFAULT_EXTENSIONS = ".mkv,.mp4,.avi,.mov,.m4v,.webm,.ts"
@@ -170,6 +173,7 @@ class EpisodeRenamerApp(BaseTk):
         self.minsize(1080, 700)
 
         self.plan: list[RenameItem] = []
+        self.plan_warnings: list[PlanWarning] = []
         self.episode_plans: list = []
         self.conflict_groups: list[ConflictGroup] = []
         self.resolved_conflict_indices: set[int] = set()
@@ -214,6 +218,7 @@ class EpisodeRenamerApp(BaseTk):
         self.tag_custom_var = tk.StringVar(value="Remote")
         self.use_scanned_tags_var = tk.BooleanVar(value=False)
         self.media_tags_in_folders_var = tk.BooleanVar(value=False)
+        self.split_versions_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Choose a folder and run Preview.")
 
         self._build_ui()
@@ -483,11 +488,25 @@ class EpisodeRenamerApp(BaseTk):
         )
         self.tags_in_folders_check.grid(row=1, column=4, columnspan=2, sticky="w", padx=(12, 0), pady=(6, 0))
         self.add_tooltip(self.tags_in_folders_check, "Only available with Flatten. Include media tags in generated movie or episode folder names too.")
+        split_versions_check = ttk.Checkbutton(
+            tag_frame,
+            text="Split versions",
+            variable=self.split_versions_var,
+            command=self.preview_if_ready,
+        )
+        split_versions_check.grid(row=1, column=6, columnspan=2, sticky="w", padx=(12, 0), pady=(6, 0))
+        self.add_tooltip(
+            split_versions_check,
+            "Sort tagged versions into separate Jellyfin folders. Shows become Series (Year) - Tags/Season XX; movies become Movie (Year) - Tags.",
+        )
 
         actions = ttk.Frame(settings)
         actions.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         ttk.Button(actions, text="Preview", command=self.preview).pack(side="left")
         ttk.Button(actions, text="Apply Renames", command=self.apply_renames).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Batch Preview", command=self.batch_preview).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Preview Warnings", command=self.show_preview_warnings).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Check Structure", command=self.check_structure).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Undo Last", command=self.undo_last).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Load Settings", command=self.load_settings).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Save Settings", command=self.save_settings).pack(side="left", padx=(8, 0))
@@ -498,13 +517,15 @@ class EpisodeRenamerApp(BaseTk):
         table_frame.columnconfigure(0, weight=1)
         table_frame.rowconfigure(0, weight=1)
 
-        columns = ("kind", "current", "new", "folder")
+        columns = ("kind", "warning", "current", "new", "folder")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse", style="Preview.Treeview")
         self.tree.heading("kind", text="Kind")
+        self.tree.heading("warning", text="Warning")
         self.tree.heading("current", text="Current name")
         self.tree.heading("new", text="Target name")
         self.tree.heading("folder", text="Target folder")
         self.tree.column("kind", width=90, minwidth=70)
+        self.tree.column("warning", width=120, minwidth=90)
         self.tree.column("current", width=300, minwidth=180)
         self.tree.column("new", width=300, minwidth=180)
         self.tree.column("folder", width=380, minwidth=220)
@@ -622,6 +643,7 @@ class EpisodeRenamerApp(BaseTk):
 
     def clear_preview_state(self) -> None:
         self.plan = []
+        self.plan_warnings = []
         self.episode_plans = []
         self.conflict_groups = []
         self.conflict_plan_indices = set()
@@ -707,6 +729,7 @@ class EpisodeRenamerApp(BaseTk):
         self.tag_custom_var.set(config.get("tag_custom", self.tag_custom_var.get()) or self.tag_custom_var.get())
         self.use_scanned_tags_var.set(config.get("use_scanned_tags", "false").lower() in {"1", "true", "yes", "y"})
         self.media_tags_in_folders_var.set(config.get("media_tags_in_folders", "false").lower() in {"1", "true", "yes", "y"})
+        self.split_versions_var.set(config.get("split_versions", "false").lower() in {"1", "true", "yes", "y"})
         self.update_mode_state()
         self.update_media_tag_state()
         self.preset_var.set("Custom")
@@ -846,6 +869,7 @@ class EpisodeRenamerApp(BaseTk):
             "tag_custom": self.tag_custom_var.get(),
             "use_scanned_tags": self.use_scanned_tags_var.get(),
             "media_tags_in_folders": self.media_tags_in_folders_var.get(),
+            "split_versions": self.split_versions_var.get(),
         }
 
     def apply_settings_dict(self, settings: dict[str, object]) -> None:
@@ -879,6 +903,7 @@ class EpisodeRenamerApp(BaseTk):
         self.tag_custom_var.set(str(settings.get("tag_custom", self.tag_custom_var.get())))
         self.use_scanned_tags_var.set(bool(settings.get("use_scanned_tags", self.use_scanned_tags_var.get())))
         self.media_tags_in_folders_var.set(bool(settings.get("media_tags_in_folders", self.media_tags_in_folders_var.get())))
+        self.split_versions_var.set(bool(settings.get("split_versions", self.split_versions_var.get())))
         self.update_mode_state()
         self.update_media_tag_state()
 
@@ -1001,6 +1026,7 @@ class EpisodeRenamerApp(BaseTk):
                 f"tag_custom={self.tag_custom_var.get()}",
                 f"use_scanned_tags={str(self.use_scanned_tags_var.get()).lower()}",
                 f"media_tags_in_folders={str(self.media_tags_in_folders_var.get()).lower()}",
+                f"split_versions={str(self.split_versions_var.get()).lower()}",
                 f"extensions={self.extensions_var.get()}",
                 "",
             ]
@@ -1072,6 +1098,7 @@ class EpisodeRenamerApp(BaseTk):
             if keep_indices is None:
                 self.status_var.set(f"{len(self.conflict_groups)} conflict group(s) pending.")
                 self.plan = flatten_plan(self.episode_plans)
+                self.plan_warnings = build_plan_warnings(self.plan)
                 self._fill_table(self.plan)
                 return
             conflicted_indices = {candidate.plan_index for group in self.conflict_groups for candidate in group.candidates}
@@ -1085,6 +1112,7 @@ class EpisodeRenamerApp(BaseTk):
             self.conflict_plan_indices = set()
 
         self.plan = flatten_plan(self.episode_plans)
+        self.plan_warnings = build_plan_warnings(self.plan)
         self._fill_table(self.plan)
 
         if not self.plan:
@@ -1097,10 +1125,39 @@ class EpisodeRenamerApp(BaseTk):
             self.status_var.set(f"{len(errors)} conflict(s) found.")
             self.show_error("Conflicts found", "\n".join(errors[:20]))
             return
+        blocking_warnings = [warning for warning in self.plan_warnings if warning.severity == "error"]
+        if blocking_warnings:
+            self.status_var.set(f"{len(blocking_warnings)} blocking preview warning(s) found.")
+            self.show_error("Preview warnings", format_plan_warnings(blocking_warnings))
+            return
 
         changed = count_changed(self.plan)
-        self.status_var.set(f"Preview ready: {len(self.plan)} files, {changed} rename(s).")
+        warning_text = f", {len(self.plan_warnings)} warning(s)" if self.plan_warnings else ""
+        self.status_var.set(f"Preview ready: {len(self.plan)} files, {changed} rename(s){warning_text}.")
         self._update_preview_details()
+
+    def show_preview_warnings(self) -> None:
+        if not self.plan:
+            self.preview()
+            if not self.plan:
+                return
+        self.plan_warnings = build_plan_warnings(self.plan)
+        report = format_plan_warnings(self.plan_warnings)
+        if self.plan_warnings:
+            self.show_scrollable_error("Preview warnings", report)
+        else:
+            messagebox.showinfo("Preview warnings", report)
+
+    def check_structure(self) -> None:
+        folder = Path(self.folder_var.get()).expanduser()
+        issues = build_structure_report(folder, parse_extensions(self.extensions_var.get()))
+        report = format_structure_report(issues)
+        if issues:
+            self.show_scrollable_error("Structure check", report)
+            self.status_var.set(f"Structure check found {len(issues)} issue(s).")
+        else:
+            messagebox.showinfo("Structure check", report)
+            self.status_var.set("Structure check passed.")
 
     def resolve_conflicts_dialog(self, conflict_groups: list[ConflictGroup]) -> set[int] | None:
         dialog = tk.Toplevel(self)
@@ -1266,6 +1323,241 @@ class EpisodeRenamerApp(BaseTk):
         keep_indices = set(state["keep_indices"])  # type: ignore[arg-type]
         return keep_indices or None
 
+    def batch_preview(self) -> None:
+        try:
+            jobs = self._build_batch_jobs_from_form()
+        except ValueError as error:
+            self.show_error("Invalid batch settings", str(error))
+            return
+        if not jobs:
+            messagebox.showinfo("Batch preview", "No direct child folders with video files were found.")
+            self.status_var.set("Batch preview found no media folders.")
+            return
+        self.show_batch_dialog(jobs)
+
+    def _build_batch_jobs_from_form(self) -> list[BatchJob]:
+        folder = Path(self.folder_var.get()).expanduser()
+        if not folder.exists() or not folder.is_dir():
+            raise ValueError(f"Folder does not exist: {folder}")
+        try:
+            start_episode = int(self.start_episode_var.get())
+        except ValueError as error:
+            raise ValueError("Start episode must be a number.") from error
+
+        return build_batch_jobs(
+            root=folder,
+            movie_mode=self.movie_mode_var.get(),
+            extensions=parse_extensions(self.extensions_var.get()),
+            recursive=self.recursive_var.get(),
+            include_sidecars=self.include_sidecars_var.get(),
+            flatten=self.flatten_var.get(),
+            normalize_movie_nfo=self.normalize_movie_nfo_var.get(),
+            start_episode=start_episode,
+            episode_from_path=self.episode_from_path_var.get(),
+            rename_show_folder=self.show_mode_var.get() and self.rename_show_folder_var.get(),
+            normalize_season_folder=self.show_mode_var.get() and self.normalize_season_folder_var.get(),
+            normalize_show_nfo=self.show_mode_var.get() and self.normalize_show_nfo_var.get(),
+            multi_season=self.show_mode_var.get() and self.multi_season_var.get(),
+            media_tags=self.current_media_tag_resolver(),
+            media_tags_in_folders=self.media_tags_in_folders_var.get(),
+            split_versions=self.split_versions_var.get(),
+        )
+
+    def show_batch_dialog(self, jobs: list[BatchJob]) -> None:
+        warning_cache = {index: build_plan_warnings(list(job.items)) for index, job in enumerate(jobs)}
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Batch preview")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.geometry("1120x660")
+        dialog.minsize(900, 480)
+        dialog.configure(background=self.cget("background"))
+
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+        frame.rowconfigure(3, weight=1)
+
+        ok_jobs = self.batch_applyable_jobs(jobs, warning_cache)
+        skipped = len(jobs) - len(ok_jobs)
+        summary_var = tk.StringVar(
+            value=f"{len(jobs)} batch folder(s), {len(ok_jobs)} applyable, {skipped} skipped or review needed."
+        )
+        ttk.Label(frame, textvariable=summary_var).grid(row=0, column=0, sticky="w")
+
+        columns = ("status", "title", "items", "changes", "warnings", "folder")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", style="Preview.Treeview")
+        for column, text, width in (
+            ("status", "Status", 100),
+            ("title", "Detected title", 260),
+            ("items", "Items", 70),
+            ("changes", "Changes", 80),
+            ("warnings", "Warnings", 90),
+            ("folder", "Folder", 520),
+        ):
+            tree.heading(column, text=text)
+            tree.column(column, width=width, minwidth=min(width, 160))
+        tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        scroll.grid(row=1, column=1, sticky="ns", pady=(8, 0))
+        tree.configure(yscrollcommand=scroll.set)
+
+        details = tk.Text(
+            frame,
+            height=12,
+            wrap="word",
+            borderwidth=0,
+            highlightthickness=0,
+            background="#1f232a",
+            foreground="#f2f4f8",
+            insertbackground="#f2f4f8",
+        )
+        details.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        detail_scroll = ttk.Scrollbar(frame, orient="vertical", command=details.yview)
+        detail_scroll.grid(row=3, column=2, sticky="ns", pady=(10, 0))
+        details.configure(yscrollcommand=detail_scroll.set)
+
+        button_row = ttk.Frame(frame)
+        button_row.grid(row=4, column=0, columnspan=3, sticky="e", pady=(10, 0))
+
+        def job_status(index: int, job: BatchJob) -> str:
+            warnings = warning_cache[index]
+            if job.errors or any(warning.severity == "error" for warning in warnings):
+                return "conflict"
+            if not job.items:
+                return "empty"
+            if job.changed_count == 0:
+                return "noop"
+            if warnings:
+                return "warning"
+            return "ok"
+
+        def fill_tree() -> None:
+            tree.delete(*tree.get_children())
+            for index, job in enumerate(jobs):
+                status = job_status(index, job)
+                label = f"{job.title} ({job.year})" if job.year else job.title
+                tag = status
+                tree.insert(
+                    "",
+                    "end",
+                    iid=str(index),
+                    tags=(tag,),
+                    values=(
+                        status.upper(),
+                        label,
+                        len(job.items),
+                        job.changed_count,
+                        len(warning_cache[index]),
+                        str(job.folder),
+                    ),
+                )
+            tree.tag_configure("ok", background="#1f2f26", foreground="#d8ffe2")
+            tree.tag_configure("warning", background="#333022", foreground="#fff2bf")
+            tree.tag_configure("conflict", background="#3b2328", foreground="#ffd8dd")
+            tree.tag_configure("empty", background="#262b33", foreground="#f2f4f8")
+            tree.tag_configure("noop", background="#262b33", foreground="#f2f4f8")
+            if jobs:
+                tree.selection_set("0")
+                tree.see("0")
+                update_details()
+
+        def set_details(text: str) -> None:
+            details.configure(state="normal")
+            details.delete("1.0", "end")
+            details.insert("1.0", text)
+            details.configure(state="disabled")
+
+        def update_details(event: tk.Event | None = None) -> None:
+            selection = tree.selection()
+            if not selection:
+                set_details("No batch folder selected.")
+                return
+            index = int(selection[0])
+            job = jobs[index]
+            warnings = warning_cache[index]
+            lines = [
+                f"Folder: {job.folder}",
+                f"Detected title: {job.title}",
+                f"Status: {job_status(index, job).upper()}",
+                f"Items: {len(job.items)}",
+                f"Changes: {job.changed_count}",
+                "",
+            ]
+            if job.errors:
+                lines.append("Conflicts:")
+                lines.extend(f"- {error.splitlines()[0]}" for error in job.errors[:12])
+                lines.append("")
+            if warnings:
+                lines.append("Warnings:")
+                lines.extend(f"- [{warning.severity.upper()}] {warning.title}: {warning.path}" for warning in warnings[:12])
+                lines.append("")
+            preview_items = [item for item in job.items if item.old_path != item.new_path][:12]
+            if preview_items:
+                lines.append("Rename preview:")
+                for item in preview_items:
+                    lines.append(f"- {item.old_path.name}")
+                    lines.append(f"  -> {item.new_path.name}")
+            else:
+                lines.append("No rename changes for this folder.")
+            set_details("\n".join(lines))
+
+        def apply_ok_jobs() -> None:
+            current_ok_jobs = self.batch_applyable_jobs(jobs, warning_cache)
+            total_changes = sum(job.changed_count for job in current_ok_jobs)
+            if total_changes == 0:
+                messagebox.showinfo("Nothing to rename", "No batch jobs have rename changes.")
+                return
+            confirmed = messagebox.askyesno(
+                "Apply batch renames",
+                f"Apply {total_changes} rename/delete change(s) across {len(current_ok_jobs)} batch folder(s)?\n\n"
+                "Jobs with conflicts or blocking warnings will be skipped.",
+            )
+            if not confirmed:
+                return
+            total = 0
+            failed: list[str] = []
+            for job in current_ok_jobs:
+                try:
+                    result = rename_files(list(job.items))
+                    total += result.renamed_count
+                except OSError as error:
+                    failed.append(f"{job.folder}: {error}")
+            self.clear_preview_state()
+            if failed:
+                self.show_error("Some batch jobs failed", "\n".join(failed[:20]))
+            self.status_var.set(f"Batch apply complete: renamed/deleted {total} item(s).")
+            messagebox.showinfo("Batch complete", f"Renamed/deleted {total} item(s).")
+            dialog.grab_release()
+            dialog.destroy()
+
+        def close_dialog() -> None:
+            dialog.grab_release()
+            dialog.destroy()
+
+        ttk.Button(button_row, text="Apply OK Jobs", command=apply_ok_jobs).pack(side="right")
+        ttk.Button(button_row, text="Close", command=close_dialog).pack(side="right", padx=(0, 8))
+        tree.bind("<<TreeviewSelect>>", update_details)
+        dialog.bind("<Escape>", lambda _event: close_dialog())
+        fill_tree()
+        self.wait_window(dialog)
+
+    def batch_applyable_jobs(
+        self,
+        jobs: list[BatchJob],
+        warning_cache: dict[int, list[PlanWarning]],
+    ) -> list[BatchJob]:
+        applyable: list[BatchJob] = []
+        for index, job in enumerate(jobs):
+            if job.errors or job.changed_count == 0:
+                continue
+            if any(warning.severity == "error" for warning in warning_cache[index]):
+                continue
+            applyable.append(job)
+        return applyable
+
     def apply_renames(self) -> None:
         if not self.plan:
             self.preview()
@@ -1378,6 +1670,7 @@ class EpisodeRenamerApp(BaseTk):
                 normalize_movie_nfo=self.normalize_movie_nfo_var.get(),
                 media_tags=self.current_media_tag_resolver(),
                 media_tags_in_folders=self.media_tags_in_folders_var.get(),
+                split_versions=self.split_versions_var.get(),
             )
         elif self.show_mode_var.get() and self.multi_season_var.get():
             media_plans = build_multi_season_episode_plans(
@@ -1394,6 +1687,7 @@ class EpisodeRenamerApp(BaseTk):
                 normalize_show_nfo=self.normalize_show_nfo_var.get(),
                 media_tags=self.current_media_tag_resolver(),
                 media_tags_in_folders=self.media_tags_in_folders_var.get(),
+                split_versions=self.split_versions_var.get(),
             )
         else:
             try:
@@ -1418,6 +1712,7 @@ class EpisodeRenamerApp(BaseTk):
                 normalize_show_nfo=self.show_mode_var.get() and self.normalize_show_nfo_var.get(),
                 media_tags=self.current_media_tag_resolver(),
                 media_tags_in_folders=self.media_tags_in_folders_var.get(),
+                split_versions=self.split_versions_var.get(),
             )
         return media_plans
 
@@ -1466,8 +1761,11 @@ class EpisodeRenamerApp(BaseTk):
         self.tree.delete(*self.tree.get_children())
         for index, item in enumerate(plan):
             folder_text = self._short_target_folder(item)
+            warning_text = self._warning_text_for_item(item)
             is_conflict = index in self.conflict_plan_indices
             tag_prefix = "even" if index % 2 == 0 else "odd"
+            if warning_text:
+                tag_prefix += "warning"
             if is_conflict:
                 tag_prefix += "conflict"
             if item.kind == "delete":
@@ -1479,20 +1777,36 @@ class EpisodeRenamerApp(BaseTk):
                 tags=(tag_prefix,),
                 values=(
                     item.kind,
+                    warning_text,
                     item.old_path.name,
                     item.new_path.name,
                     folder_text,
-            ),
-        )
+                ),
+            )
         self.tree.tag_configure("even", background="#1f232a", foreground="#f2f4f8")
         self.tree.tag_configure("odd", background="#262b33", foreground="#f2f4f8")
+        self.tree.tag_configure("evenwarning", background="#333022", foreground="#fff2bf")
+        self.tree.tag_configure("oddwarning", background="#3c3828", foreground="#fff2bf")
         self.tree.tag_configure("evendelete", background="#33272d", foreground="#f2f4f8")
         self.tree.tag_configure("odddelete", background="#3a2c33", foreground="#f2f4f8")
         self.tree.tag_configure("evenconflict", background="#3b2328", foreground="#ffd8dd")
         self.tree.tag_configure("oddconflict", background="#47272d", foreground="#ffd8dd")
+        self.tree.tag_configure("evenwarningconflict", background="#4b3420", foreground="#fff2bf")
+        self.tree.tag_configure("oddwarningconflict", background="#573d25", foreground="#fff2bf")
         self.tree.tag_configure("evenconflictdelete", background="#4a2028", foreground="#ffd8dd")
         self.tree.tag_configure("oddconflictdelete", background="#56262f", foreground="#ffd8dd")
         self._update_preview_details()
+
+    def _warning_text_for_item(self, item: RenameItem) -> str:
+        related = [
+            warning
+            for warning in self.plan_warnings
+            if warning.path in {item.old_path, item.new_path, item.old_path.parent, item.new_path.parent}
+        ]
+        if not related:
+            return ""
+        highest = sorted(related, key=lambda warning: {"error": 0, "warning": 1, "info": 2}.get(warning.severity, 3))[0]
+        return f"{highest.severity}: {highest.title}"
 
     def _set_text(self, widget: tk.Text, lines: list[tuple[str, str]]) -> None:
         widget.configure(state="normal")
@@ -1536,13 +1850,15 @@ class EpisodeRenamerApp(BaseTk):
         except (ValueError, IndexError):
             return
         values = self.tree.item(item_id, "values")
-        if len(values) < 4:
+        if len(values) < 5:
             return
-        kind, _, _, folder_text = values[:4]
+        kind, warning_text, _, _, folder_text = values[:5]
         self.preview_kind_var.set(kind)
         item_index = int(item_id)
         if item_index in self.conflict_plan_indices:
             self.preview_state_var.set("Conflict")
+        elif warning_text:
+            self.preview_state_var.set(str(warning_text))
         else:
             self.preview_state_var.set("Ready")
         self.preview_current_path_var.set(str(plan_item.old_path))

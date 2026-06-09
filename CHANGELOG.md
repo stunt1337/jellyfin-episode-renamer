@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.5.0 - Batch workflow, split versions, and rename safety
+
+### Added
+
+- **Split versions** option for sorting tagged movie or show versions into separate Jellyfin folders.
+- Show version splitting creates version-specific show roots such as `Show (2024) - 2160p HEVC EAC3/Season 01/...`.
+- Movie version splitting creates version-specific movie folders such as `Movie (2024) - 2160p HEVC EAC3/...`.
+- **Check Structure** action in the GUI for common Jellyfin structure problems.
+- `--check-structure` CLI mode for duplicate episode versions, loose episodes, and orphan sidecars.
+- Preview warnings in the GUI and CLI for risky plans such as existing targets, duplicate episode targets, no-op items, and loose episode targets.
+- Persistent `rename-history.json` with `--history` and `--undo-run RUN_ID`.
+- **Batch Preview** GUI dialog for previewing and applying direct child media folders from one library root.
+- `--batch` CLI mode for previewing or applying direct child media folders.
+- Regression coverage for splitting movie and show versions by scanned or manual media tags.
+- Regression coverage for preview warnings, batch planning, and history undo.
+
+### Validation
+
+- `python3 -m py_compile jellyfin_episode_renamer.py jellyfin_episode_renamer_gui.py batch_ops.py plan_warnings.py rename_ops.py tests/test_planning.py`
+- `python3 -m unittest discover -s tests -v`
+
 ## v1.4.0 - Media tags and ffprobe scanning
 
 ### Added
@@ -80,8 +101,6 @@
 - Duplicate orphan episode `.nfo` files no longer block preview when a better matching episode `.nfo` is already planned.
 - Project metadata now lives in `pyproject.toml`.
 - `jellyfin_episode_renamer.py` is now a smaller CLI entry point with compatibility exports for existing imports.
-
-## Unreleased
 
 ## v1.1.0 - GUI workflow and safer folder cleanup
 

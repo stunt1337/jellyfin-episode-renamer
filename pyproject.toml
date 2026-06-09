@@ -1,6 +1,6 @@
 [project]
 name = "jellyfin-episode-renamer"
-version = "1.4.0"
+version = "1.5.0"
 description = "Preview and rename Jellyfin movie, show, season, episode, metadata, and trickplay files."
 readme = "README.md"
 requires-python = ">=3.10"

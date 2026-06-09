@@ -89,6 +89,10 @@ tag_custom=Remote
 use_scanned_tags=false
 # Only applies when flatten=true. Adds media tags to generated folder names too.
 media_tags_in_folders=false
+# true = sort tagged versions into separate Jellyfin folders.
+# Shows: Example Show (2024) - 2160p HEVC EAC3/Season 01/...
+# Movies: Example Movie (2024) - 2160p HEVC EAC3/...
+split_versions=false
 
 # Supported video file extensions.
 extensions=.mkv,.mp4,.avi,.mov,.m4v,.webm,.ts

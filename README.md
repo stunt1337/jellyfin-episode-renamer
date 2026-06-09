@@ -23,8 +23,13 @@ It is designed for local media libraries where episode or movie files still use 
 - Optional external subtitle renaming with Jellyfin suffixes such as `.en.srt`, `.default.en.forced.ass`, and `.en.sdh.srt`
 - Optional folder flattening into one folder per episode
 - Optional media tags such as `2160p HDR HEVC EAC3 Remote`
+- Optional version splitting into separate movie or show folders based on media tags
+- Jellyfin structure check for duplicate episode versions, loose episodes, and orphan sidecars
+- Preview warnings for no-op items, existing targets, duplicate episode targets, and loose episode targets
 - Removes old source folders after renaming when they are empty
 - Undo log for the last rename operation
+- Persistent rename history with undo by run ID from the command line
+- Optional batch mode for planning or applying direct child media folders
 - Ignores `sample`, `samples`, and `.trickplay` folders
 - Graphical interface for previewing and applying rename plans
 - No external Python dependencies
@@ -48,6 +53,7 @@ media_detection.py               GUI folder detection and name parsing
 media_config.py                  Settings file parsing and shared paths
 media_models.py                  Rename plan data classes
 media_probe.py                   Optional ffprobe-based media tag detection
+structure_check.py               Jellyfin structure checks and report formatting
 tests/                           Regression tests for risky rename scenarios
 settings.example.txt             Example settings for CLI and GUI defaults
 run-gui.*                        OS-specific GUI launchers
@@ -87,7 +93,9 @@ If a dropped show root contains season folders such as `Show.S01`, `Season 02`, 
 
 In the GUI, **Clean old paths** can be enabled for Show/Series workflows. After a successful apply run, the GUI asks before deleting old source folders that sit outside the new Jellyfin structure. This is intended for leftover release folders or old show roots after the files and metadata have moved.
 
-The GUI also includes built-in presets such as `Jellyfin Movie`, `Jellyfin Show Root`, `Jellyfin Season`, and `Loose Release Folder`. You can store your own named profiles from the current settings and load them later. The preview panel combines a compact table with a side-by-side diff view for the selected item.
+The GUI also includes built-in presets such as `Jellyfin Movie`, `Jellyfin Show Root`, `Jellyfin Season`, and `Loose Release Folder`. You can store your own named profiles from the current settings and load them later. The preview panel combines a compact table with a warning column and a side-by-side diff view for the selected item.
+
+Use **Batch Preview** when the selected folder is a library root that contains several movie or show folders. The batch dialog scans each direct child folder, shows which jobs are OK, empty, warning-only, or blocked by conflicts, and applies only OK jobs after confirmation.
 
 ## Settings File
 
@@ -127,6 +135,7 @@ tag_custom_enabled=false
 tag_custom=Remote
 use_scanned_tags=false
 media_tags_in_folders=false
+split_versions=false
 ```
 
 After an apply run, old source folders that became empty are removed automatically. Folders that still contain unrelated files are left in place.
@@ -149,6 +158,24 @@ John Wick (2014)/John Wick (2014) - 2160p HDR HEVC EAC3 Remote.mkv
 ```
 
 Enable **Tags in folders** only if you also want generated folders to include the same media tags. The option is only available when **Flatten** is enabled.
+
+Enable **Split versions** when several media versions currently sit in the same folder and should become separate Jellyfin folders.
+
+For shows, this turns one mixed show root into version-specific show roots:
+
+```text
+Spider Noir (2026) - 1080p H264 EAC3/Season 01/Spider Noir - S01E01 - 1080p H264 EAC3.mkv
+Spider Noir (2026) - 2160p DV HDR HEVC EAC3/Season 01/Spider Noir - S01E01 - 2160p DV HDR HEVC EAC3.mkv
+```
+
+For movies, this creates version-specific movie folders:
+
+```text
+John Wick (2014) - 1080p H264 EAC3/John Wick (2014) - 1080p H264 EAC3.mkv
+John Wick (2014) - 2160p HEVC EAC3/John Wick (2014) - 2160p HEVC EAC3.mkv
+```
+
+Video-level sidecars such as matching `.nfo`, subtitles, thumbnails, and `.trickplay` folders follow the matching video version. Generic movie artwork, movie-level metadata, show-root artwork, and season-level artwork are not duplicated by this option.
 
 For ffprobe installation and scan examples, see [docs/FFPROBE_MEDIA_TAGS.md](docs/FFPROBE_MEDIA_TAGS.md).
 
@@ -196,6 +223,32 @@ Every apply run writes `rename-log.json`, which can be used to undo the last ren
 
 ```bash
 python3 jellyfin_episode_renamer.py --undo
+```
+
+Apply runs are also appended to `rename-history.json`. Show the latest history entries:
+
+```bash
+python3 jellyfin_episode_renamer.py --history
+```
+
+Undo a specific history entry by run ID:
+
+```bash
+python3 jellyfin_episode_renamer.py --undo-run 20260609T120000Z
+```
+
+In the GUI, choose or drop the library root folder and click **Batch Preview**.
+
+From the command line, preview every direct child media folder below the configured `folder` with:
+
+```bash
+python3 jellyfin_episode_renamer.py --batch
+```
+
+Add `--apply` to apply every batch job that has no conflicts:
+
+```bash
+python3 jellyfin_episode_renamer.py --batch --apply
 ```
 
 When files are moved into a new folder layout, empty old source folders are removed after the rename succeeds. Non-empty folders are never deleted automatically.

@@ -6,7 +6,8 @@ import json
 import sys
 from pathlib import Path
 
-from media_config import CONFIG_FILE, UNDO_LOG_FILE, as_bool, read_config
+from batch_ops import BatchJob, build_batch_jobs, format_batch_summary
+from media_config import CONFIG_FILE, RENAME_HISTORY_FILE, UNDO_LOG_FILE, as_bool, read_config
 from media_models import ConflictCandidate, ConflictGroup, EpisodePlan, RenameItem, RenameResult
 from media_tags import MediaTagOptions, append_media_tags, build_media_tag_suffix
 from media_paths import (
@@ -25,6 +26,7 @@ from media_paths import (
     show_target_dir,
 )
 from planners import build_episode_plans, build_movie_plans, build_multi_season_episode_plans, build_plan, detect_season_folders, flatten_plan
+from plan_warnings import PlanWarning, build_plan_warnings, format_plan_warnings
 from rename_ops import (
     apply_conflict_resolution,
     build_conflict_groups,
@@ -32,7 +34,9 @@ from rename_ops import (
     delete_stale_source_dirs,
     find_stale_source_dirs,
     rename_files,
+    rename_history_runs,
     undo_from_log,
+    undo_from_history,
     validate_plan,
 )
 from sidecars import (
@@ -59,10 +63,12 @@ from sidecars import (
     selected_show_nfo,
     sidecar_kind,
 )
+from structure_check import StructureIssue, build_structure_report, format_structure_report
 
 __all__ = [
     "CONFIG_FILE",
     "UNDO_LOG_FILE",
+    "RENAME_HISTORY_FILE",
     "IGNORED_FOLDER_NAMES",
     "SIDECAR_IMAGE_SUFFIXES",
     "IMAGE_EXTENSIONS",
@@ -74,6 +80,8 @@ __all__ = [
     "ConflictGroup",
     "EpisodePlan",
     "RenameResult",
+    "BatchJob",
+    "PlanWarning",
     "MediaTagOptions",
     "as_bool",
     "read_config",
@@ -86,7 +94,9 @@ __all__ = [
     "build_conflict_groups",
     "apply_conflict_resolution",
     "rename_files",
+    "rename_history_runs",
     "undo_from_log",
+    "undo_from_history",
     "count_changed",
     "find_stale_source_dirs",
     "delete_stale_source_dirs",
@@ -123,6 +133,13 @@ __all__ = [
     "main",
     "build_multi_season_episode_plans",
     "detect_season_folders",
+    "StructureIssue",
+    "build_structure_report",
+    "format_structure_report",
+    "build_plan_warnings",
+    "format_plan_warnings",
+    "build_batch_jobs",
+    "format_batch_summary",
 ]
 
 
@@ -138,6 +155,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Rename TV episode and movie files for Jellyfin.")
     parser.add_argument("--apply", action="store_true", help="Override dry_run=true and rename files.")
     parser.add_argument("--undo", action="store_true", help="Undo the last rename operation from rename-log.json.")
+    parser.add_argument("--undo-run", metavar="RUN_ID", help="Undo a specific run from rename-history.json.")
+    parser.add_argument("--history", action="store_true", help="Show persistent rename history.")
+    parser.add_argument("--batch", action="store_true", help="Preview or apply all direct child media folders below the configured folder.")
+    parser.add_argument("--check-structure", action="store_true", help="Scan the configured folder for common Jellyfin structure issues.")
     args = parser.parse_args()
 
     if args.undo:
@@ -150,6 +171,26 @@ def main() -> int:
             print(f"Undo failed: {error}")
             return 1
         print(f"Undo complete. Reverted {count} item(s).")
+        return 0
+
+    if args.undo_run:
+        try:
+            count = undo_from_history(args.undo_run)
+        except (FileNotFoundError, RuntimeError, OSError, json.JSONDecodeError) as error:
+            print(f"Undo failed: {error}")
+            return 1
+        print(f"Undo complete. Reverted {count} item(s) from run {args.undo_run}.")
+        return 0
+
+    if args.history:
+        runs = rename_history_runs(RENAME_HISTORY_FILE)
+        if not runs:
+            print("No rename history found.")
+            return 0
+        for run in reversed(runs[-20:]):
+            items = run.get("items", [])
+            count = len(items) if isinstance(items, list) else 0
+            print(f"{run.get('run_id', 'unknown')}  {run.get('created_at', '')}  {count} item(s)")
         return 0
 
     try:
@@ -172,6 +213,7 @@ def main() -> int:
     normalize_movie_nfo = as_bool(config.get("normalize_movie_nfo", "false"))
     flatten = as_bool(config.get("flatten", "false"))
     media_tags_in_folders = as_bool(config.get("media_tags_in_folders", "false"))
+    split_versions = as_bool(config.get("split_versions", "false"))
     rename_show_folder = as_bool(config.get("rename_show_folder", "false"))
     normalize_season_folder = as_bool(config.get("normalize_season_folder", "false"))
     normalize_show_nfo = as_bool(config.get("normalize_show_nfo", "false"))
@@ -194,6 +236,49 @@ def main() -> int:
         print(f"Error: folder does not exist: {folder}")
         return 1
 
+    if args.check_structure:
+        issues = build_structure_report(folder, extensions)
+        print(format_structure_report(issues))
+        return 1 if any(issue.severity == "error" for issue in issues) else 0
+
+    if args.batch:
+        jobs = build_batch_jobs(
+            root=folder,
+            movie_mode=movie_mode,
+            extensions=extensions,
+            recursive=recursive,
+            include_sidecars=include_sidecars,
+            flatten=flatten,
+            normalize_movie_nfo=normalize_movie_nfo,
+            start_episode=int(config.get("start_episode", "1")),
+            episode_from_path=episode_from_path,
+            rename_show_folder=rename_show_folder,
+            normalize_season_folder=normalize_season_folder,
+            normalize_show_nfo=normalize_show_nfo,
+            multi_season=multi_season,
+            media_tags=media_tags,
+            media_tags_in_folders=media_tags_in_folders,
+            split_versions=split_versions,
+        )
+        print(format_batch_summary(jobs))
+        if not args.apply:
+            print("\nBatch dry run only. Add --apply to rename all OK jobs.")
+            return 1 if any(job.errors for job in jobs) else 0
+
+        total = 0
+        failed = False
+        for job in jobs:
+            if job.errors:
+                failed = True
+                print(f"Skipping {job.folder}: {job.errors[0].splitlines()[0]}")
+                continue
+            if not job.items or job.changed_count == 0:
+                continue
+            result = rename_files(list(job.items))
+            total += result.renamed_count
+        print(f"\nBatch apply complete. Renamed/deleted {total} item(s). History: {RENAME_HISTORY_FILE}")
+        return 1 if failed else 0
+
     if movie_mode and not movie_name:
         print("Error: movie_name is empty.")
         return 1
@@ -214,6 +299,7 @@ def main() -> int:
             normalize_movie_nfo=normalize_movie_nfo,
             media_tags=media_tags,
             media_tags_in_folders=media_tags_in_folders,
+            split_versions=split_versions,
         )
     elif multi_season:
         start_episode = int(config.get("start_episode", "1"))
@@ -231,6 +317,7 @@ def main() -> int:
             normalize_show_nfo=normalize_show_nfo,
             media_tags=media_tags,
             media_tags_in_folders=media_tags_in_folders,
+            split_versions=split_versions,
         )
     else:
         season = int(config.get("season", "1"))
@@ -251,6 +338,7 @@ def main() -> int:
             normalize_show_nfo=normalize_show_nfo,
             media_tags=media_tags,
             media_tags_in_folders=media_tags_in_folders,
+            split_versions=split_versions,
         )
 
     plan = flatten_plan(media_plans)
@@ -263,6 +351,14 @@ def main() -> int:
         print("Plan has conflicts:")
         for error in errors:
             print(f"- {error}")
+        return 1
+
+    warnings = build_plan_warnings(plan)
+    blocking_warnings = [warning for warning in warnings if warning.severity == "error"]
+    if warnings:
+        print(format_plan_warnings(warnings))
+        print("")
+    if blocking_warnings:
         return 1
 
     for item in plan:
@@ -279,6 +375,7 @@ def main() -> int:
 
     result = rename_files(plan)
     print(f"Renamed/deleted {result.renamed_count} item(s). Undo log: {UNDO_LOG_FILE}")
+    print(f"History: {RENAME_HISTORY_FILE}")
     if result.removed_empty_dirs:
         print(f"Removed {len(result.removed_empty_dirs)} empty source folder(s).")
     return 0

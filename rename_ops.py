@@ -7,7 +7,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from media_config import UNDO_LOG_FILE
+from media_config import RENAME_HISTORY_FILE, UNDO_LOG_FILE
 from media_models import ConflictCandidate, ConflictGroup, EpisodePlan, RenameItem, RenameResult
 
 
@@ -15,16 +15,25 @@ def validate_plan(plan: list[tuple[Path, Path]] | list[RenameItem]) -> list[str]
     errors: list[str] = []
     items = normalize_plan_items(plan)
     target_sources: dict[Path, list[RenameItem]] = defaultdict(list)
+    source_targets: dict[Path, list[RenameItem]] = defaultdict(list)
     for item in items:
         if item.kind == "delete":
             continue
         target_sources[item.new_path].append(item)
+        source_targets[item.old_path].append(item)
 
     for target, duplicate_items in sorted(target_sources.items()):
         if len(duplicate_items) <= 1:
             continue
         sources = "\n".join(f"  - {item.old_path}" for item in duplicate_items)
         errors.append(f"Target path would be duplicated: {target}\n{sources}")
+
+    for source, duplicate_items in sorted(source_targets.items()):
+        targets = {item.new_path for item in duplicate_items}
+        if len(targets) <= 1:
+            continue
+        target_text = "\n".join(f"  - {item.new_path}" for item in duplicate_items)
+        errors.append(f"Source path would be moved to multiple targets: {source}\n{target_text}")
 
     source_paths = {item.old_path.resolve() for item in items}
     for item in items:
@@ -196,7 +205,9 @@ def is_relative_to(path: Path, parent: Path) -> bool:
 
 
 def write_undo_log(items: list[RenameItem], undo_log: Path) -> None:
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     data = {
+        "run_id": run_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "items": [
             {
@@ -208,6 +219,74 @@ def write_undo_log(items: list[RenameItem], undo_log: Path) -> None:
         ],
     }
     undo_log.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    append_rename_history(data, undo_log.with_name(RENAME_HISTORY_FILE.name))
+
+
+def append_rename_history(run: dict[str, object], history_log: Path) -> None:
+    data = read_rename_history(history_log)
+    runs = data.setdefault("runs", [])
+    if not isinstance(runs, list):
+        runs = []
+        data["runs"] = runs
+    runs.append(run)
+    history_log.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def read_rename_history(history_log: Path = RENAME_HISTORY_FILE) -> dict[str, object]:
+    if not history_log.exists():
+        return {"runs": []}
+    try:
+        data = json.loads(history_log.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"runs": []}
+    if not isinstance(data, dict):
+        return {"runs": []}
+    runs = data.get("runs", [])
+    if not isinstance(runs, list):
+        data["runs"] = []
+    return data
+
+
+def rename_history_runs(history_log: Path = RENAME_HISTORY_FILE) -> list[dict[str, object]]:
+    runs = read_rename_history(history_log).get("runs", [])
+    return [run for run in runs if isinstance(run, dict)]
+
+
+def undo_from_history(run_id: str, history_log: Path = RENAME_HISTORY_FILE) -> int:
+    run = next((entry for entry in rename_history_runs(history_log) if str(entry.get("run_id", "")) == run_id), None)
+    if run is None:
+        raise FileNotFoundError(f"Rename history run not found: {run_id}")
+    items_data = run.get("items", [])
+    if not isinstance(items_data, list):
+        raise RuntimeError(f"Rename history run has no item list: {run_id}")
+
+    cleanup_dirs: list[Path] = []
+    items: list[RenameItem] = []
+    for entry in reversed(items_data):
+        if not isinstance(entry, dict):
+            continue
+        old_path = entry.get("old_path")
+        new_path = entry.get("new_path")
+        if not isinstance(old_path, str) or not isinstance(new_path, str):
+            continue
+        cleanup_dirs.append(Path(new_path).parent)
+        items.append(
+            RenameItem(
+                old_path=Path(new_path),
+                new_path=Path(old_path),
+                kind=str(entry.get("kind", "file")),
+            )
+        )
+    errors = validate_plan(items)
+    if errors:
+        raise RuntimeError("\n".join(errors))
+    rename_files(items, undo_log=None, cleanup_empty_dirs=False)
+    for directory in sorted(set(cleanup_dirs), key=lambda path: len(path.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    return len(items)
 
 
 def undo_from_log(undo_log: Path) -> int:
